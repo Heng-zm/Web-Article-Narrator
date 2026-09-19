@@ -1,0 +1,23 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database
+bot_database.db
+bot_database.db-journal
+*.sqlite3
+
+# Wasmer vendored packages
+packages/
+
+# IDEs
+.vscode/
+.idea/

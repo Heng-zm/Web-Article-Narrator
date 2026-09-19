@@ -1,0 +1,18 @@
+[package]
+name = "my-namespace/telegram-news-bot"
+version = "0.1.0"
+description = "Automated Telegram News Bot"
+license = "MIT"
+
+[dependencies]
+"wasmer/python" = "3.11.3"
+
+[fs]
+"/app" = "."
+"/data" = "database_volume"
+
+[[command]]
+name = "bot"
+module = "wasmer/python:python"
+runner = "wasi"
+annotations = { wasi = { main-args = ["/app/worker.py"] } }

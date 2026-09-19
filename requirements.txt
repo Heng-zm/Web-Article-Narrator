@@ -1,0 +1,15 @@
+python-telegram-bot>=20.0
+trafilatura
+readability-lxml
+deep-translator
+beautifulsoup4
+apscheduler
+python-dotenv
+httpx
+aiosqlite
+aiohttp
+cloudscraper
+sumy
+telegraph
+feedparser
+duckduckgo-search
