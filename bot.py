@@ -31,10 +31,23 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
 BASE_URL = os.environ.get('BASE_URL')
 
-async def on_startup(application: Application):
-    """Initialize DB on startup."""
-    logger.info("Initializing database...")
+async def on_startup(app: Application):
+    """Initializes the database and sets the Telegram Bot Command Menu."""
     await storage.init_db()
+    
+    try:
+        from telegram import BotCommand
+        commands = [
+            BotCommand("start", "ចាប់ផ្តើមទទួលព័ត៌មាន (Start)"),
+            BotCommand("categories", "ជ្រើសរើសប្រភេទព័ត៌មាន (Categories)"),
+            BotCommand("latest", "អានព័ត៌មានចុងក្រោយ (Latest News)"),
+            BotCommand("stats", "មើលស្ថិតិអ្នកអាន (Bot Stats)"),
+            BotCommand("stop", "ឈប់ទទួលព័ត៌មាន (Stop)")
+        ]
+        await app.bot.set_my_commands(commands)
+        logger.info("Successfully registered bot command menu!")
+    except Exception as e:
+        logger.error(f"Failed to set bot commands: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Subscribe the user."""
