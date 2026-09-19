@@ -300,7 +300,11 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        try:
+            await update.callback_query.edit_message_text(text, parse_mode='HTML', reply_markup=reply_markup)
+        except Exception as e:
+            if "Message is not modified" not in str(e):
+                logger.error(f"Failed to edit message: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles button clicks from the inline keyboard."""
