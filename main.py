@@ -28,8 +28,8 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 BASE_URL = os.environ.get('BASE_URL')
 CHECK_INTERVAL_MINUTES = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
 
-async def broadcast_to_user(bot: Bot, chat_id, summary, image_bytes, voice_bytes=None, reply_markup=None):
-    """Helper to send image + text + voice to a single user."""
+async def broadcast_to_user(bot: Bot, chat_id, summary, image_bytes, reply_markup=None):
+    """Helper to send image + text to a single user."""
     try:
         # Telegram caption limit is 1024 characters.
         caption = summary[:1000] + "..." if len(summary) > 1024 else summary
@@ -38,16 +38,10 @@ async def broadcast_to_user(bot: Bot, chat_id, summary, image_bytes, voice_bytes
             try:
                 await bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=caption, parse_mode='HTML', reply_markup=reply_markup, read_timeout=20)
             except Exception as e:
-                logger.error(f"Failed to send photo to {chat_id}: {e}")
+                logger.warning(f"Failed to send photo to {chat_id}, falling back to text message: {e}")
                 await bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML', reply_markup=reply_markup)
         else:
             await bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML', reply_markup=reply_markup)
-            
-        if voice_bytes:
-            try:
-                await bot.send_voice(chat_id=chat_id, voice=voice_bytes, read_timeout=20)
-            except Exception as e:
-                logger.error(f"Failed to send voice to {chat_id}: {e}")
     except Exception as e:
         logger.error(f"Failed to send to {chat_id}: {e}")
 
@@ -232,50 +226,26 @@ async def process_articles(bot: Bot):
                     image_bytes = await asyncio.to_thread(fetch_img)
                 except Exception as e:
                     logger.warning(f"Failed to download image {article['image_url']}: {e}")
-                    
-            # Generate Text-To-Speech Audio
-            voice_bytes = None
-            try:
-                def generate_tts():
-                    import io
-                    from gtts import gTTS
-                    tts = gTTS(text=f"{article['km_title']}. {raw_km_text}", lang='km')
-                    fp = io.BytesIO()
-                    tts.write_to_fp(fp)
-                    fp.seek(0)
-                    return fp.read()
-                voice_bytes = await asyncio.to_thread(generate_tts)
-            except Exception as e:
-                logger.warning(f"Failed to generate TTS audio: {e}")
             
-            # Ultra-fast broadcast: Upload media once and cache the file_id!
+            # Ultra-fast broadcast: Upload image once and cache the file_id!
             cached_photo = image_bytes
-            cached_voice = voice_bytes
-            if target_subscribers:
+            if image_bytes and target_subscribers:
                 try:
                     first_user = target_subscribers[0]
-                    if image_bytes:
-                        msg = await bot.send_photo(chat_id=first_user, photo=image_bytes, caption=summary, parse_mode='HTML', reply_markup=reply_markup)
-                        cached_photo = msg.photo[-1].file_id # Get Telegram's internal ID
-                    else:
-                        await bot.send_message(chat_id=first_user, text=summary, parse_mode='HTML', reply_markup=reply_markup)
-                        
-                    if voice_bytes:
-                        v_msg = await bot.send_voice(chat_id=first_user, voice=voice_bytes)
-                        cached_voice = v_msg.voice.file_id
-                        
+                    msg = await bot.send_photo(chat_id=first_user, photo=image_bytes, caption=summary, parse_mode='HTML', reply_markup=reply_markup)
+                    cached_photo = msg.photo[-1].file_id # Get Telegram's internal ID
                     target_subscribers = target_subscribers[1:] # Skip first user
-                    logger.info(f"Successfully sent and cached media for {first_user}")
+                    logger.info(f"Successfully sent and cached photo for {first_user}")
                 except Exception as e:
-                    logger.warning(f"Failed to cache media on first user: {e}")
+                    logger.warning(f"Failed to cache photo on first user {target_subscribers[0]}: {e}")
 
-            # Broadcast to remaining subscribers concurrently in batches using the cached file_ids
+            # Broadcast to remaining subscribers concurrently in batches using the cached file_id
             batch_size = 20
             for i in range(0, len(target_subscribers), batch_size):
                 batch = target_subscribers[i:i+batch_size]
                 
                 tasks = [
-                    broadcast_to_user(bot, chat_id, summary, cached_photo, cached_voice, reply_markup)
+                    broadcast_to_user(bot, chat_id, summary, cached_photo, reply_markup)
                     for chat_id in batch
                 ]
                 await asyncio.gather(*tasks)
