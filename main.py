@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 BASE_URL = os.environ.get('BASE_URL')
-CHECK_INTERVAL_MINUTES = int(os.environ.get('CHECK_INTERVAL_MINUTES', 30))
+CHECK_INTERVAL_MINUTES = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
 
 async def broadcast_to_user(bot: Bot, chat_id, summary, image_bytes, reply_markup=None):
     """Helper to send image + text to a single user."""
