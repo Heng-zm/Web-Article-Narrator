@@ -170,8 +170,16 @@ async def process_articles(bot: Bot):
             else:
                 hashtags = "#ព័ត៌មានទូទៅ"
                 
-            footer = f"🔒 <b>ប្រភព:</b> {domain}\n🟢 <b>ស្ថានភាព:</b> {status_badge}\n📅 {date_str}\n\n{hashtags}"
-            header = f"📰 <b>{article['km_title']}</b>\n\n"
+            footer = f"🔗 <b>ប្រភព:</b> {domain}\n🛡️ <b>បញ្ជាក់ប្រភព:</b> {status_badge}\n📅 {date_str}\n\n{hashtags}"
+            
+            # Smart Hot News Detection
+            hot_keywords = ['breaking', 'urgent', 'alert', 'exclusive', 'emergency', 'attack', 'blast', 'dead', 'killed', 'បន្ទាន់', 'ក្តៅគគុក', 'ទាន់ហេតុការណ៍', 'រន្ធត់', 'ផ្ទុះ', 'ស្លាប់']
+            is_hot_news = any(kw in str(article.get('en_title', '')).lower() or kw in str(article.get('km_title', '')).lower() for kw in hot_keywords)
+            
+            if is_hot_news:
+                header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{article['km_title']}</b>\n\n"
+            else:
+                header = f"📰 <b>{article['km_title']}</b>\n\n"
             
             # Format the translated summary into clean bullet points
             raw_km_text = article['km_text']
