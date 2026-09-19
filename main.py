@@ -73,10 +73,14 @@ async def process_articles(bot: Bot):
             
         all_new_articles = []
     try:
-        for base in urls_to_check:
-            articles = await get_new_articles(base)
-            if articles:
-                for article in articles:
+        # === STAGE 1: CONCURRENT I/O SCRAPING ===
+        logger.info(f"Pipeline Stage 1: Concurrently scraping {len(urls_to_check)} websites...")
+        scraping_tasks = [get_new_articles(base) for base in urls_to_check]
+        results = await asyncio.gather(*scraping_tasks, return_exceptions=True)
+        
+        for result in results:
+            if isinstance(result, list):
+                for article in result:
                     if not await storage.is_article_sent(article['hash']):
                         all_new_articles.append(article)
                         
@@ -91,31 +95,32 @@ async def process_articles(bot: Bot):
         for article in all_new_articles:
             article['short_summary'] = await asyncio.to_thread(extractive_summary, article['text'])
             
-        # === STAGE 3: TRANSLATE & VERIFY ===
-        logger.info("Pipeline Stage 3: Translating & Verifying articles (Sequential pacing)...")
+        # === STAGE 3: TRANSLATE & VERIFY (Asynchronous Sub-Tasking) ===
+        logger.info("Pipeline Stage 3: Translating & Verifying articles (Optimized Pacing)...")
         from extractor import verify_article_sources
         from telegraph_engine import get_telegraph_url
         
         for article in all_new_articles:
-            # 1. Translate Title to Khmer
-            article['km_title'] = await asyncio.to_thread(translate_text, article.get('title', ''))
-            await asyncio.sleep(2.0)
-            
-            # 2. Verify Fake News (Use English URL slug instead of translation to save Google Rate Limits)
             url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
             article['en_title'] = url_slug
-            article['verification'] = await asyncio.to_thread(verify_article_sources, url_slug)
             
-            # 3. Translate Summary
+            # 1. Run Verification and Title Translation Concurrently
+            km_title_task = asyncio.to_thread(translate_text, article.get('title', ''))
+            verification_task = asyncio.to_thread(verify_article_sources, url_slug)
+            
+            article['km_title'], article['verification'] = await asyncio.gather(km_title_task, verification_task)
+            await asyncio.sleep(2.0)
+            
+            # 2. Translate Summary
             article['km_text'] = await asyncio.to_thread(translate_text, article['short_summary'])
             await asyncio.sleep(2.0)
             
-            # 4. Translate Full Text for Telegraph (Cap at 2500 chars to avoid bans)
+            # 3. Translate Full Text for Telegraph (Cap at 2500 chars)
             full_text = article.get('text', '')
             article['km_full_text'] = await asyncio.to_thread(translate_text, full_text[:2500])
             await asyncio.sleep(2.0)
             
-            # 5. Generate Telegraph Page
+            # 4. Generate Telegraph Page
             article['telegraph_url'] = await asyncio.to_thread(
                 get_telegraph_url,
                 article['km_title'],
