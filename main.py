@@ -383,10 +383,11 @@ async def main():
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    logger.info("Webhook server listening on http://0.0.0.0:8080/trigger")
+    logger.info(f"Webhook server listening on http://0.0.0.0:{port}/trigger")
     logger.info("System fully operational!")
     
     # Keep the main process alive
