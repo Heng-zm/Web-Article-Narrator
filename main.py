@@ -281,21 +281,44 @@ async def main():
         logger.error("BOT_TOKEN is not set.")
         return
 
-    logger.info("Starting Worker with Webhook Server...")
+    logger.info("Starting Webhook, Scheduler, and Telegram Bot...")
     
-    # Initialize Bot client
-    bot = Bot(token=BOT_TOKEN)
+    # 1. Build Telegram Application and attach handlers
+    import bot as bot_module
+    from telegram.ext import Application, CommandHandler, CallbackQueryHandler
     
-    # Connect to DB
-    await storage.init_db()
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    # Start the background polling loop concurrently and keep a strong reference!
-    bg_task = asyncio.create_task(background_scheduler(bot))
+    application.add_handler(CommandHandler("start", bot_module.start))
+    application.add_handler(CommandHandler("stop", bot_module.stop))
+    application.add_handler(CommandHandler("status", bot_module.status))
+    application.add_handler(CommandHandler("broadcast", bot_module.broadcast))
+    application.add_handler(CommandHandler("addurl", bot_module.addurl))
+    application.add_handler(CommandHandler("removeurl", bot_module.removeurl))
+    application.add_handler(CommandHandler("listurls", bot_module.listurls))
+    application.add_handler(CommandHandler("stats", bot_module.bot_stats))
+    application.add_handler(CommandHandler("latest", bot_module.latest))
+    application.add_handler(CommandHandler("categories", bot_module.categories_menu))
+    application.add_handler(CallbackQueryHandler(bot_module.button_handler))
+    
+    # Initialize and start the Telegram bot
+    await application.initialize()
+    await application.start()
+    
+    # Call the on_startup hook to init DB and set commands
+    await bot_module.on_startup(application)
+    
+    # Start polling for commands
+    await application.updater.start_polling()
+    logger.info("Telegram Bot Polling started!")
+    
+    # 2. Start the background polling loop
+    bg_task = asyncio.create_task(background_scheduler(application.bot))
     active_tasks.add(bg_task)
     
-    # Start the aiohttp web server
+    # 3. Start the aiohttp web server
     app = web.Application()
-    app['bot'] = bot
+    app['bot'] = application.bot
     app.router.add_get('/trigger', webhook_handler)
     
     runner = web.AppRunner(app)
@@ -304,6 +327,7 @@ async def main():
     await site.start()
     
     logger.info("Webhook server listening on http://0.0.0.0:8080/trigger")
+    logger.info("System fully operational!")
     
     # Keep the main process alive
     await asyncio.Event().wait()
