@@ -50,13 +50,21 @@ async def on_startup(app: Application):
         logger.error(f"Failed to set bot commands: {e}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Subscribe the user."""
+    """Subscribe the user and prompt categories."""
     chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+    
     await storage.add_subscriber(chat_id)
-    await update.message.reply_text(
-        "Welcome! / សូមស្វាគមន៍!\n"
-        "You are now subscribed to receive translated articles."
+    
+    welcome_text = (
+        f"សួស្តី <b>{user_name}</b>! 👋 សូមស្វាគមន៍មកកាន់ប្រព័ន្ធព័ត៌មានទាន់ហេតុការណ៍!\n\n"
+        "Bot នេះមានភាពឆ្លាតវៃ (Smart AI) ក្នុងការតាមដាន និងបកប្រែព័ត៌មានថ្មីៗបំផុតពីគេហទំព័រល្បីៗ រៀងរាល់ ៥នាទីម្តង ភ្លាមៗពេលមានរឿងរ៉ាវកើតឡើង (Breaking News) វានឹងបញ្ជូនមកកាន់អ្នកដោយស្វ័យប្រវត្តិ។\n\n"
+        "👇 សូមជ្រើសរើសប្រភេទព័ត៌មានដែលអ្នកចង់តាមដាន៖"
     )
+    
+    await update.message.reply_text(welcome_text, parse_mode='HTML')
+    # Automatically show category selection menu so the bot "knows" the user
+    await categories_menu(update, context)
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Unsubscribe the user."""
