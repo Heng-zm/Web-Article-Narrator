@@ -9,6 +9,10 @@ import asyncio
 from requests.adapters import HTTPAdapter
 import feedparser
 from duckduckgo_search import DDGS
+import warnings
+
+# Suppress the harmless duckduckgo_search renaming warning
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
 
 def verify_article_sources(english_title: str) -> dict:
     """Uses DuckDuckGo to search the English title and find verification across global sources."""

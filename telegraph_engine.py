@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 _telegraph = Telegraph()
 _account_created = False
 
-def get_telegraph_url(title: str, content_text: str, image_url: str = None) -> str:
+def get_telegraph_url(title: str, content_text: str, image_url: str = None, source_url: str = None) -> str:
     """
     Generates a Telegraph Instant View page for the given article.
     """
@@ -27,6 +27,10 @@ def get_telegraph_url(title: str, content_text: str, image_url: str = None) -> s
         for p in paragraphs:
             if p.strip():
                 html_blocks.append(f'<p>{p.strip()}</p>')
+
+        if source_url:
+            html_blocks.append('<hr/>')
+            html_blocks.append(f'<p><em>🔗 <a href="{source_url}">អានប្រភពដើម (Read Original Source)</a></em></p>')
 
         html_content = "".join(html_blocks)
 

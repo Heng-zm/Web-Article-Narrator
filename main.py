@@ -120,7 +120,8 @@ async def process_articles(bot: Bot):
                 get_telegraph_url,
                 article['km_title'],
                 article['km_full_text'],
-                article.get('image_url')
+                article.get('image_url'),
+                article['url']
             )
             
         # === STAGE 4: BROADCAST ===
