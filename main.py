@@ -277,10 +277,56 @@ async def webhook_handler(request):
     task.add_done_callback(active_tasks.discard)
     return web.Response(text="Scrape triggered successfully!")
 
+async def send_daily_digest(bot: Bot):
+    """Sends a summary of the top news of the morning to all users."""
+    try:
+        logger.info("Generating Morning Daily Digest...")
+        # Get subscribers
+        subscribers = await storage.get_subscribers()
+        if not subscribers:
+            return
+            
+        urls = await storage.get_base_urls()
+        digest_text = "🌅 <b>សង្ខេបព័ត៌មានប្រចាំថ្ងៃ (Morning Daily Digest)</b>\n\n"
+        
+        # Scrape 3 top articles fresh from the sources
+        articles_added = 0
+        for url in urls[:2]:
+            articles = await get_new_articles(url)
+            for art in articles[:2]:
+                title = await asyncio.to_thread(translate_text, art['en_title'], 'km')
+                digest_text += f"🔹 <a href='{art['url']}'>{title}</a>\n"
+                articles_added += 1
+                
+        if articles_added == 0:
+            return
+            
+        digest_text += "\n<i>សូមជូនពរឱ្យអ្នកមានថ្ងៃដ៏ល្អ! ☀️</i>"
+        
+        # Broadcast to everyone
+        for chat_id in subscribers:
+            try:
+                await bot.send_message(chat_id=chat_id, text=digest_text, parse_mode='HTML', disable_web_page_preview=True)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Failed to send digest: {e}")
+
 async def background_scheduler(bot: Bot):
     """The original background polling loop."""
     logger.info(f"Background scheduler started. Polling every {CHECK_INTERVAL_MINUTES} minutes.")
+    
+    digest_sent_date = None
+    
     while True:
+        now = datetime.now()
+        # Send Daily Digest at 8:00 AM Cambodia time (UTC+7 usually, assuming server is on same timezone)
+        if now.hour == 8 and now.minute < CHECK_INTERVAL_MINUTES:
+            if digest_sent_date != now.date():
+                await send_daily_digest(bot)
+                digest_sent_date = now.date()
+                
         await process_articles(bot)
         await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
 
@@ -293,7 +339,7 @@ async def main():
     
     # 1. Build Telegram Application and attach handlers
     import bot as bot_module
-    from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+    from telegram.ext import Application, CommandHandler, CallbackQueryHandler, InlineQueryHandler
     
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -308,6 +354,7 @@ async def main():
     application.add_handler(CommandHandler("latest", bot_module.latest))
     application.add_handler(CommandHandler("categories", bot_module.categories_menu))
     application.add_handler(CallbackQueryHandler(bot_module.button_handler))
+    application.add_handler(InlineQueryHandler(bot_module.inline_search))
     
     # Initialize and start the Telegram bot
     await application.initialize()

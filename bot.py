@@ -7,10 +7,11 @@ if os.path.exists('packages'):
 import logging
 import asyncio
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, InlineQueryHandler
 from urllib.parse import urlparse
 from datetime import datetime
+from uuid import uuid4
 
 import storage
 from extractor import get_new_articles
@@ -314,6 +315,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await storage.toggle_user_category(chat_id, cat)
         # Refresh menu
         await categories_menu(update, context)
+
+async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles inline queries for searching news via DuckDuckGo."""
+    query = update.inline_query.query
+    if not query:
+        return
+        
+    try:
+        from duckduckgo_search import DDGS
+        # Search DuckDuckGo News
+        results = DDGS().news(query, max_results=5)
+        
+        inline_results = []
+        for res in results:
+            title = res.get('title', '')
+            url = res.get('url', '')
+            body = res.get('body', '')
+            source = res.get('source', '')
+            
+            # Translate title to Khmer
+            km_title = await asyncio.to_thread(translate_text, title, 'km')
+            
+            message_text = f"📰 <b>{km_title}</b>\n\n<i>{body}</i>\n\n🔗 <b>ប្រភព:</b> {source}\n<a href='{url}'>អានបន្ត / Read More</a>"
+            
+            inline_results.append(
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=km_title,
+                    description=f"{source} - {title}",
+                    input_message_content=InputTextMessageContent(
+                        message_text,
+                        parse_mode='HTML'
+                    )
+                )
+            )
+            
+        await update.inline_query.answer(inline_results, cache_time=300)
+    except Exception as e:
+        logger.error(f"Inline search failed: {e}")
 
 def main():
     if not BOT_TOKEN:
