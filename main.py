@@ -65,11 +65,6 @@ async def process_articles(bot: Bot):
         if not urls_to_check:
             logger.warning("No base URLs configured. Add one via /addurl.")
             return
-        
-        subscribers = await storage.get_subscribers()
-        if not subscribers:
-            logger.info("No subscribers to send to.")
-            return
             
         all_new_articles = []
     try:
@@ -134,6 +129,7 @@ async def process_articles(bot: Bot):
         from categorizer import categorize_article
         
         # Massively optimize database performance by fetching all preferences in a single O(1) query
+        subscribers = await storage.get_subscribers()
         all_user_prefs = await storage.get_all_user_categories()
         
         for article in all_new_articles:
