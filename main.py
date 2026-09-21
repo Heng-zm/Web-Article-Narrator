@@ -268,6 +268,10 @@ from aiohttp import web
 # Keep strong references to background tasks so they don't get garbage collected
 active_tasks = set()
 
+async def health_check(request):
+    """Health check endpoint for Render."""
+    return web.Response(text="OK")
+
 async def webhook_handler(request):
     """Handle incoming GET requests to trigger a scrape immediately."""
     logger.info("Received external webhook trigger!")
@@ -375,6 +379,7 @@ async def main():
     # 3. Start the aiohttp web server
     app = web.Application()
     app['bot'] = application.bot
+    app.router.add_get('/', health_check)
     app.router.add_get('/trigger', webhook_handler)
     
     runner = web.AppRunner(app)
