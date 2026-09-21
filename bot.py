@@ -363,21 +363,6 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to send latest to {chat_id}: {e}")
         await context.bot.send_message(chat_id=chat_id, text="Failed to send the article.")
 
-async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to remove a base URL."""
-    chat_id = str(update.effective_chat.id)
-    if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-        
-    if not context.args:
-        await update.message.reply_text("Usage: /removeurl <https://example.com>")
-        return
-        
-    url = context.args[0]
-    await storage.remove_base_url(url)
-    await update.message.reply_text(f"🗑 Successfully removed {url} from the tracking list.")
-
 async def listurls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all tracked URLs."""
     if str(update.effective_chat.id) != ADMIN_CHAT_ID:

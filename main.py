@@ -153,225 +153,225 @@ async def process_articles(bot: Bot):
             return
             
         all_new_articles = []
-    try:
-        # === STAGE 1: CONCURRENT I/O SCRAPING ===
-        logger.info(f"Pipeline Stage 1: Concurrently scraping {len(urls_to_check)} websites...")
-        scraping_tasks = [get_new_articles(base) for base in urls_to_check]
-        results = await asyncio.gather(*scraping_tasks, return_exceptions=True)
-        
-        for result in results:
-            if isinstance(result, list):
-                for article in result:
-                    if not await storage.is_article_sent(article['hash']):
-                        all_new_articles.append(article)
-                        
-        if not all_new_articles:
-            logger.info("No new articles found.")
-            return
+        try:
+            # === STAGE 1: CONCURRENT I/O SCRAPING ===
+            logger.info(f"Pipeline Stage 1: Concurrently scraping {len(urls_to_check)} websites...")
+            scraping_tasks = [get_new_articles(base) for base in urls_to_check]
+            results = await asyncio.gather(*scraping_tasks, return_exceptions=True)
             
-        logger.info(f"Pipeline Stage 1: Extracted {len(all_new_articles)} new articles.")
-        
-        # === STAGE 2: SUMMARIZE ===
-        logger.info("Pipeline Stage 2: Summarizing articles locally...")
-        for article in all_new_articles:
-            article['short_summary'] = await asyncio.to_thread(extractive_summary, article['text'])
+            for result in results:
+                if isinstance(result, list):
+                    for article in result:
+                        if not await storage.is_article_sent(article['hash']):
+                            all_new_articles.append(article)
+                            
+            if not all_new_articles:
+                logger.info("No new articles found.")
+                return
+                
+            logger.info(f"Pipeline Stage 1: Extracted {len(all_new_articles)} new articles.")
             
-        # === STAGE 3: TRANSLATE & VERIFY (Asynchronous Sub-Tasking) ===
-        logger.info("Pipeline Stage 3: Translating & Verifying articles (Optimized Pacing)...")
-        from extractor import verify_article_sources
-        from telegraph_engine import get_telegraph_url
-        
-        for article in all_new_articles:
-            # Combine title + slug for maximum NLP keyword detection accuracy
-            url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
-            raw_title = article.get('title', '')
-            article['en_title'] = f"{raw_title} {url_slug}".strip()
+            # === STAGE 2: SUMMARIZE ===
+            logger.info("Pipeline Stage 2: Summarizing articles locally...")
+            for article in all_new_articles:
+                article['short_summary'] = await asyncio.to_thread(extractive_summary, article['text'])
+                
+            # === STAGE 3: TRANSLATE & VERIFY (Asynchronous Sub-Tasking) ===
+            logger.info("Pipeline Stage 3: Translating & Verifying articles (Optimized Pacing)...")
+            from extractor import verify_article_sources
+            from telegraph_engine import get_telegraph_url
             
-            # 1. Run Verification and Title Translation Concurrently
-            km_title_task = asyncio.to_thread(translate_text, raw_title or url_slug)
-            verification_task = asyncio.to_thread(verify_article_sources, url_slug)
+            for article in all_new_articles:
+                # Combine title + slug for maximum NLP keyword detection accuracy
+                url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
+                raw_title = article.get('title', '')
+                article['en_title'] = f"{raw_title} {url_slug}".strip()
+                
+                # 1. Run Verification and Title Translation Concurrently
+                km_title_task = asyncio.to_thread(translate_text, raw_title or url_slug)
+                verification_task = asyncio.to_thread(verify_article_sources, url_slug)
+                
+                article['km_title'], article['verification'] = await asyncio.gather(km_title_task, verification_task)
+                await asyncio.sleep(1.0)
+                
+                # 2. Translate Summary
+                article['km_text'] = await asyncio.to_thread(translate_text, article['short_summary'])
+                await asyncio.sleep(1.0)
+                
+                # 3. Translate Full Text for Telegraph (Cap at 2500 chars)
+                full_text = article.get('text', '')
+                article['km_full_text'] = await asyncio.to_thread(translate_text, full_text[:2500])
+                await asyncio.sleep(1.0)
+                
+                # 4. Generate Telegraph Page
+                article['telegraph_url'] = await asyncio.to_thread(
+                    get_telegraph_url,
+                    article['km_title'],
+                    article['km_full_text'],
+                    article.get('image_url'),
+                    article['url']
+                )
+                
+            # === STAGE 4: BROADCAST WITH STRICT CATEGORY DISPATCHING ===
+            logger.info("Pipeline Stage 4: Broadcasting to users with strict category filtering...")
+            from categorizer import analyze_article_metadata
             
-            article['km_title'], article['verification'] = await asyncio.gather(km_title_task, verification_task)
-            await asyncio.sleep(1.0)
+            # Preload subscribers and category preferences in a single O(1) RAM lookup
+            subscribers = await storage.get_subscribers()
+            all_user_prefs = await storage.get_all_user_categories()
             
-            # 2. Translate Summary
-            article['km_text'] = await asyncio.to_thread(translate_text, article['short_summary'])
-            await asyncio.sleep(1.0)
-            
-            # 3. Translate Full Text for Telegraph (Cap at 2500 chars)
-            full_text = article.get('text', '')
-            article['km_full_text'] = await asyncio.to_thread(translate_text, full_text[:2500])
-            await asyncio.sleep(1.0)
-            
-            # 4. Generate Telegraph Page
-            article['telegraph_url'] = await asyncio.to_thread(
-                get_telegraph_url,
-                article['km_title'],
-                article['km_full_text'],
-                article.get('image_url'),
-                article['url']
-            )
-            
-        # === STAGE 4: BROADCAST WITH STRICT CATEGORY DISPATCHING ===
-        logger.info("Pipeline Stage 4: Broadcasting to users with strict category filtering...")
-        from categorizer import analyze_article_metadata
-        
-        # Preload subscribers and category preferences in a single O(1) RAM lookup
-        subscribers = await storage.get_subscribers()
-        all_user_prefs = await storage.get_all_user_categories()
-        
-        for article in all_new_articles:
-            # Deep Multi-Factor NLP Analysis (weighted scoring, urgency, categories)
-            analysis = analyze_article_metadata(
-                km_title=article.get('km_title', ''),
-                km_text=article.get('km_text', ''),
-                en_title=article.get('en_title', '')
-            )
-            article_cats = analysis['categories']
-            article['categories'] = article_cats
-            
-            # Strict Category Dispatching:
-            target_subscribers = []
-            for sub_id in subscribers:
-                user_cats = all_user_prefs.get(sub_id, [])
-                if user_cats:
-                    # User configured categories: ONLY send if article matches at least one!
-                    if any(c in user_cats for c in article_cats):
+            for article in all_new_articles:
+                # Deep Multi-Factor NLP Analysis (weighted scoring, urgency, categories)
+                analysis = analyze_article_metadata(
+                    km_title=article.get('km_title', ''),
+                    km_text=article.get('km_text', ''),
+                    en_title=article.get('en_title', '')
+                )
+                article_cats = analysis['categories']
+                article['categories'] = article_cats
+                
+                # Strict Category Dispatching:
+                target_subscribers = []
+                for sub_id in subscribers:
+                    user_cats = all_user_prefs.get(sub_id, [])
+                    if user_cats:
+                        # User configured categories: ONLY send if article matches at least one!
+                        if any(c in user_cats for c in article_cats):
+                            target_subscribers.append(sub_id)
+                    else:
+                        # User hasn't configured categories yet: send all articles
                         target_subscribers.append(sub_id)
+                        
+                url = article['url']
+                domain = urlparse(url).netloc.replace('www.', '')
+                date_str = datetime.now().strftime("%d/%m/%Y")
+                
+                verif = article.get('verification', {})
+                if verif.get('verified'):
+                    status_badge = f"✅ បានបញ្ជាក់ដោយ {verif['sources']} ប្រភព (Verified)"
                 else:
-                    # User hasn't configured categories yet: send all articles
-                    target_subscribers.append(sub_id)
-                    
-            url = article['url']
-            domain = urlparse(url).netloc.replace('www.', '')
-            date_str = datetime.now().strftime("%d/%m/%Y")
-            
-            verif = article.get('verification', {})
-            if verif.get('verified'):
-                status_badge = f"✅ បានបញ្ជាក់ដោយ {verif['sources']} ប្រភព (Verified)"
-            else:
-                status_badge = "⚠️ មិនមានប្រភពអន្តរជាតិ (Unverified)"
-            
-            hashtags = analysis['hashtags']
-            footer = f"🔗 <b>ប្រភព:</b> {domain}\n🛡️ <b>បញ្ជាក់ប្រភព:</b> {status_badge}\n📅 {date_str}\n\n{hashtags}"
-            
-            if analysis['is_hot']:
-                header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{article['km_title']}</b>\n\n"
-            else:
-                header = f"📰 <b>{article['km_title']}</b>\n\n"
-            
-            # Format clean bullet points
-            raw_km_text = article['km_text']
-            lines = [line.strip() for line in raw_km_text.split('|||') if line.strip()]
-            
-            clean_km_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
-            current_len = 0
-            max_text_len = 950 - len(header) - len(footer)
-            
-            for line in lines:
-                line = line.lstrip('•').lstrip('-').lstrip('*').lstrip('🔹').strip()
-                if current_len + len(line) > max_text_len:
-                    remaining = max_text_len - current_len
-                    if remaining > 15:
-                        clean_km_text += f"• {line[:remaining]}...\n"
-                    break
-                    
-                clean_km_text += f"• {line}\n"
-                current_len += len(line)
+                    status_badge = "⚠️ មិនមានប្រភពអន្តរជាតិ (Unverified)"
                 
-            summary = f"{header}{clean_km_text.strip()}\n\n{footer}"
-            
-            # Interactive buttons
-            keyboard = []
-            if article.get('telegraph_url'):
-                keyboard.append([InlineKeyboardButton("⚡ អានអត្ថបទពេញ (Instant View)", url=article['telegraph_url'])])
+                hashtags = analysis['hashtags']
+                footer = f"🔗 <b>ប្រភព:</b> {domain}\n🛡️ <b>បញ្ជាក់ប្រភព:</b> {status_badge}\n📅 {date_str}\n\n{hashtags}"
                 
-            # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
-            if "សង្គ្រាម" in article_cats:
-                from categorizer import get_conflict_map_info
-                map_info = get_conflict_map_info(text=f"{article.get('title', '')} {raw_km_text}", url=url)
-                if map_info:
-                    keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
-                    
-            keyboard.append([InlineKeyboardButton("🔗 អានប្រភពដើម (Read Original)", url=url)])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            article['summary'] = summary
-            article['reply_markup'] = reply_markup
-            
-            # Download image bytes if available
-            image_bytes = None
-            if article.get('image_url'):
-                from extractor import get_scraper
-                try:
-                    def fetch_img():
-                        with get_scraper() as scraper:
-                            res = scraper.get(article['image_url'], timeout=10)
-                            return res.content if res.status_code == 200 else None
-                    image_bytes = await asyncio.to_thread(fetch_img)
-                except Exception as e:
-                    logger.warning(f"Failed to download image {article['image_url']}: {e}")
-
-            # Store in RAM cache immediately so 100s of active users get it without re-scraping
-            storage.store_processed_articles([{
-                'url': url,
-                'title': article.get('title', ''),
-                'km_title': article['km_title'],
-                'summary': summary,
-                'image_url': article.get('image_url'),
-                'categories': article_cats,
-                'hashtags': hashtags,
-                'is_hot': analysis['is_hot'],
-                'reply_markup': reply_markup,
-                'image_bytes': image_bytes
-            }])
-
-            if not target_subscribers:
-                await storage.mark_article_sent(article['hash'])
-                continue
-
-            # High-Concurrency Optimization: Upload image ONCE to get Telegram file_id
-            cached_photo = image_bytes
-            if image_bytes and target_subscribers:
-                for candidate in list(target_subscribers[:5]):
-                    try:
-                        msg = await bot.send_photo(
-                            chat_id=candidate, photo=image_bytes,
-                            caption=summary, parse_mode='HTML',
-                            reply_markup=reply_markup, read_timeout=20
-                        )
-                        cached_photo = msg.photo[-1].file_id  # Reusable Telegram photo ID
-                        article['photo_file_id'] = cached_photo
-                        target_subscribers.remove(candidate)
-                        logger.info(f"Successfully cached photo file_id via user {candidate}")
+                if analysis['is_hot']:
+                    header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{article['km_title']}</b>\n\n"
+                else:
+                    header = f"📰 <b>{article['km_title']}</b>\n\n"
+                
+                # Format clean bullet points
+                raw_km_text = article['km_text']
+                lines = [line.strip() for line in raw_km_text.split('|||') if line.strip()]
+                
+                clean_km_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
+                current_len = 0
+                max_text_len = 950 - len(header) - len(footer)
+                
+                for line in lines:
+                    line = line.lstrip('•').lstrip('-').lstrip('*').lstrip('🔹').strip()
+                    if current_len + len(line) > max_text_len:
+                        remaining = max_text_len - current_len
+                        if remaining > 15:
+                            clean_km_text += f"• {line[:remaining]}...\n"
                         break
-                    except Exception as e:
-                        logger.warning(f"Photo upload candidate {candidate} failed: {e}")
-                        err = str(e).lower()
-                        if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
-                            await storage.remove_subscriber(candidate)
-                            if candidate in target_subscribers:
-                                target_subscribers.remove(candidate)
-
-            # Concurrent broadcast in controlled batches of 25 with rate-limit protection
-            batch_size = 25
-            for i in range(0, len(target_subscribers), batch_size):
-                batch = target_subscribers[i:i+batch_size]
-                tasks = [
-                    broadcast_to_user(bot, chat_id, summary, cached_photo, reply_markup)
-                    for chat_id in batch
-                ]
-                await asyncio.gather(*tasks)
-                if i + batch_size < len(target_subscribers):
-                    await asyncio.sleep(1.0)  # Safe spacing for Telegram flood limits
+                        
+                    clean_km_text += f"• {line}\n"
+                    current_len += len(line)
                     
-            await storage.mark_article_sent(article['hash'])
-            await asyncio.sleep(1.0)
+                summary = f"{header}{clean_km_text.strip()}\n\n{footer}"
+                
+                # Interactive buttons
+                keyboard = []
+                if article.get('telegraph_url'):
+                    keyboard.append([InlineKeyboardButton("⚡ អានអត្ថបទពេញ (Instant View)", url=article['telegraph_url'])])
+                    
+                # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
+                if "សង្គ្រាម" in article_cats:
+                    from categorizer import get_conflict_map_info
+                    map_info = get_conflict_map_info(text=f"{article.get('title', '')} {raw_km_text}", url=url)
+                    if map_info:
+                        keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
+                        
+                keyboard.append([InlineKeyboardButton("🔗 អានប្រភពដើម (Read Original)", url=url)])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                article['summary'] = summary
+                article['reply_markup'] = reply_markup
+                
+                # Download image bytes if available
+                image_bytes = None
+                if article.get('image_url'):
+                    from extractor import get_scraper
+                    try:
+                        def fetch_img():
+                            with get_scraper() as scraper:
+                                res = scraper.get(article['image_url'], timeout=10)
+                                return res.content if res.status_code == 200 else None
+                        image_bytes = await asyncio.to_thread(fetch_img)
+                    except Exception as e:
+                        logger.warning(f"Failed to download image {article['image_url']}: {e}")
+
+                # Store in RAM cache immediately so 100s of active users get it without re-scraping
+                storage.store_processed_articles([{
+                    'url': url,
+                    'title': article.get('title', ''),
+                    'km_title': article['km_title'],
+                    'summary': summary,
+                    'image_url': article.get('image_url'),
+                    'categories': article_cats,
+                    'hashtags': hashtags,
+                    'is_hot': analysis['is_hot'],
+                    'reply_markup': reply_markup,
+                    'image_bytes': image_bytes
+                }])
+
+                if not target_subscribers:
+                    await storage.mark_article_sent(article['hash'])
+                    continue
+
+                # High-Concurrency Optimization: Upload image ONCE to get Telegram file_id
+                cached_photo = image_bytes
+                if image_bytes and target_subscribers:
+                    for candidate in list(target_subscribers[:5]):
+                        try:
+                            msg = await bot.send_photo(
+                                chat_id=candidate, photo=image_bytes,
+                                caption=summary, parse_mode='HTML',
+                                reply_markup=reply_markup, read_timeout=20
+                            )
+                            cached_photo = msg.photo[-1].file_id  # Reusable Telegram photo ID
+                            article['photo_file_id'] = cached_photo
+                            target_subscribers.remove(candidate)
+                            logger.info(f"Successfully cached photo file_id via user {candidate}")
+                            break
+                        except Exception as e:
+                            logger.warning(f"Photo upload candidate {candidate} failed: {e}")
+                            err = str(e).lower()
+                            if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
+                                await storage.remove_subscriber(candidate)
+                                if candidate in target_subscribers:
+                                    target_subscribers.remove(candidate)
+
+                # Concurrent broadcast in controlled batches of 25 with rate-limit protection
+                batch_size = 25
+                for i in range(0, len(target_subscribers), batch_size):
+                    batch = target_subscribers[i:i+batch_size]
+                    tasks = [
+                        broadcast_to_user(bot, chat_id, summary, cached_photo, reply_markup)
+                        for chat_id in batch
+                    ]
+                    await asyncio.gather(*tasks)
+                    if i + batch_size < len(target_subscribers):
+                        await asyncio.sleep(1.0)  # Safe spacing for Telegram flood limits
+                        
+                await storage.mark_article_sent(article['hash'])
+                await asyncio.sleep(1.0)
+                
+            logger.info("Pipeline successfully completed.")
             
-        logger.info("Pipeline successfully completed.")
-        
-    except Exception as e:
-        logger.error(f"Error in process_articles job: {e}")
+        except Exception as e:
+            logger.error(f"Error in process_articles job: {e}")
 
 from aiohttp import web
 

@@ -294,7 +294,3 @@ async def get_new_articles(base_url: str) -> list:
     except Exception as e:
         logger.error(f"Failed to extract new articles from {base_url}: {e}")
         return []
-
-    except Exception as e:
-        logger.error(f"Failed to extract new articles: {e}")
-        return []
