@@ -1,4 +1,3 @@
-Python
 import sys
 try:
     import pysqlite3
