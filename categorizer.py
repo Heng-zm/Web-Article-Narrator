@@ -6,7 +6,8 @@ CATEGORIES = [
     "នយោបាយ",         # Politics
     "សង្គ្រាម",         # War
     "ពត៌មានក្នុងស្រុក",  # Local
-    "អន្តរជាតិ"        # International
+    "អន្តរជាតិ",        # International
+    "កីឡា",            # Sports
 ]
 
 KEYWORDS = {
@@ -45,8 +46,20 @@ KEYWORDS = {
         "united nations", "beijing", "washington", "nato",
         "អន្តរជាតិ", "ពិភពលោក", "អាមេរិក", "ចិន", "អឺរ៉ុប", "អាស៊ាន", "បរទេស", 
         "អង្គការសហប្រជាជាតិ", "សហភាពអឺរ៉ុប", "មហាអំណាច"
+    ],
+    "កីឡា": [
+        "sport", "football", "soccer", "basketball", "tennis", "volleyball", "badminton",
+        "olympic", "sea games", "asean games", "fifa", "world cup", "champion", "league",
+        "athlete", "tournament", "medal", "gold", "silver", "bronze", "stadium", "match",
+        "score", "goal", "player", "coach", "team", "win", "defeat", "final", "semifinal",
+        "boxing", "swimming", "cycling", "marathon", "athletics", "gym", "wrestling",
+        "កីឡា", "បាល់ទាត់", "បាល់បោះ", "វាយកូនបាល់", "ជើងឯក", "ស៊ីហ្គេម", "អូឡាំពិក",
+        "មេដាយ", "មាស", "ប្រាក់", "សំរឹទ្ធ", "ពានរង្វាន់", "ការប្រកួត", "គ្រូបង្ហាត់",
+        "អត្តពលិក", "ក្រុម", "ចំណាត់ថ្នាក់", "ជ័យជំនះ", "ការចាញ់", "គោល", "ទន្លប",
+        "ពហុកីឡាដ្ឋាន", "ប្រកួតជម្រុះ", "វគ្គផ្តាច់ព្រ័ត្រ", "ហ្វ៊ីហ្វា", "អ.ស.ប"
     ]
 }
+
 
 HOT_KEYWORDS = [
     'breaking', 'urgent', 'alert', 'exclusive', 'emergency', 'attack', 'blast', 

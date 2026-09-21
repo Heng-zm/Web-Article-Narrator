@@ -19,8 +19,10 @@ from extractor import get_new_articles
 from translator import translate_text
 from summarizer import extractive_summary
 from categorizer import CATEGORIES, categorize_article, analyze_article_metadata
+import re
 import time
 _bot_start_time = time.time()
+
 
 # Setup logging
 logging.basicConfig(
@@ -190,30 +192,31 @@ async def addurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add one or multiple base URLs to scrape in bulk."""
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ Unauthorized.")
+        await update.effective_message.reply_text("⛔ Unauthorized.")
         return
-        
-    raw_text = update.message.text or ""
-    import re
+
+    # effective_message covers regular messages, edited messages, and channel posts
+    msg = update.effective_message
+    raw_text = (msg.text if msg else None) or " ".join(context.args or [])
     # Extract all valid URLs from the message (supports multiple links on separate lines or spaces)
     found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
-    
+
     if not found_urls:
-        await update.message.reply_text(
+        await msg.reply_text(
             "ℹ️ <b>របៀបប្រើ /addurl (Bulk URL Add):</b>\n\n"
             "អ្នកអាចដាក់ Link មួយ ឬច្រើនក្នុងពេលតែមួយបាន (ចុះបន្ទាត់)៖\n"
             "<code>/addurl https://news1.com\nhttps://news2.com\nhttps://news3.com</code>",
             parse_mode='HTML'
         )
         return
-        
+
     clean_urls = list(dict.fromkeys([u.strip().rstrip('/') for u in found_urls]))
     added_urls = await storage.add_base_urls(clean_urls)
-    
+
     if not added_urls:
-        await update.message.reply_text("⚠️ មិនអាចបញ្ចូល Link ទាំងនេះបានទេ។ សូមពិនិត្យមើល Link ម្តងទៀត។")
+        await msg.reply_text("⚠️ មិនអាចបញ្ចូល Link ទាំងនេះបានទេ។ សូមពិនិត្យមើល Link ម្តងទៀត។")
         return
-        
+
     url_list_str = "\n".join([f"  {idx}. {u}" for idx, u in enumerate(added_urls, 1)])
     reply_text = (
         f"✅ <b>ជោគជ័យ! បានបញ្ចូល ({len(added_urls)}) ប្រភពព័ត៌មានទៅក្នុងប្រព័ន្ធ:</b>\n"
@@ -221,7 +224,8 @@ async def addurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{url_list_str}\n\n"
         f"<i>📡 Bot នឹងចាប់ផ្តើមតាមដាន និងទាញយកព័ត៌មានពីគេហទំព័រទាំងនេះដោយស្វ័យប្រវត្តិ!</i>"
     )
-    await update.message.reply_text(reply_text, parse_mode='HTML')
+    await msg.reply_text(reply_text, parse_mode='HTML')
+
 
 async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to remove one or multiple base URLs."""
@@ -231,8 +235,8 @@ async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     raw_text = update.message.text or ""
-    import re
     found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+
     if not found_urls and context.args:
         found_urls = context.args
         
@@ -294,48 +298,21 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     domain = urlparse(url).netloc.replace('www.', '')
     date_str = datetime.now().strftime("%d/%m/%Y")
-    
+
     # 3. Smart NLP Metadata Analysis
     url_slug = url.strip('/').split('/')[-1].replace('-', ' ')
     analysis = analyze_article_metadata(km_title=km_title, km_text=km_text, en_title=url_slug)
-    
-    footer = f"🔗 <b>ប្រភព:</b> {domain}\n📅 {date_str}\n\n{analysis['hashtags']}"
-    
-    if analysis['is_hot']:
-        header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{km_title}</b>\n\n"
-    else:
-        header = f"📰 <b>{km_title}</b>\n\n"
-    
-    # 4. Format clean bullet points
-    raw_km_text = km_text
-    lines = [line.strip() for line in raw_km_text.split('|||') if line.strip()]
-    
-    clean_km_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
-    current_len = 0
-    max_text_len = 950 - len(header) - len(footer)
-    
-    for line in lines:
-        line = line.lstrip('•').lstrip('-').lstrip('*').lstrip('🔹').strip()
-        if current_len + len(line) > max_text_len:
-            remaining = max_text_len - current_len
-            if remaining > 15:
-                clean_km_text += f"• {line[:remaining]}...\n"
-            break
-            
-        clean_km_text += f"• {line}\n"
-        current_len += len(line)
-        
-    summary = f"{header}{clean_km_text.strip()}\n\n{footer}"
-    
-    keyboard = []
-    # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
-    if "សង្គ្រាម" in analysis.get('categories', []):
-        from categorizer import get_conflict_map_info
-        map_info = get_conflict_map_info(text=f"{title} {km_title} {raw_km_text}", url=url)
-        if map_info:
-            keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
-    keyboard.append([InlineKeyboardButton("🔗 អានដើម (Read Original)", url=url)])
-    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # 4. Format caption & keyboard via shared formatter
+    from formatter import format_article_message
+    summary, reply_markup = format_article_message(
+        km_title=km_title,
+        km_text=km_text,
+        url=url,
+        analysis=analysis,
+        date_str=date_str,
+    )
+
     
     # 5. Fetch Image with upload action indicator
     image_bytes = None
@@ -520,58 +497,46 @@ async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
         return
 
     # Process and send top 3 matches
+    from formatter import format_article_message
     for art in matched[:3]:
         try:
-            analysis = art.get('_analysis', {})
             title = art.get('title', 'ព័ត៌មានថ្មី')
             text_body = art.get('text', '')
 
             await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
             short_summary = await asyncio.to_thread(extractive_summary, text_body)
+            # Translate title and summary concurrently
             km_title, km_text = await asyncio.gather(
                 asyncio.to_thread(translate_text, title),
-                asyncio.to_thread(translate_text, short_summary)
+                asyncio.to_thread(translate_text, short_summary),
             )
 
             url = art['url']
-            domain = urlparse(url).netloc.replace('www.', '')
-            date_str = datetime.now().strftime("%d/%m/%Y")
-            hashtags = analysis.get('hashtags', '#ព័ត៌មានទូទៅ')
+            url_slug = url.strip('/').split('/')[-1].replace('-', ' ')
+            # Re-analyse with translated Khmer text for accurate category matching
+            analysis = analyze_article_metadata(
+                km_title=km_title,
+                km_text=km_text,
+                en_title=f"{title} {url_slug}".strip(),
+            )
+            art['categories'] = analysis['categories']
 
-            if analysis.get('is_hot'):
-                header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING)</b> 🔥🚨\n\n📰 <b>{km_title}</b>\n\n"
-            else:
-                header = f"📰 <b>{km_title}</b>\n\n"
-
-            lines = [l.strip() for l in km_text.split('|||') if l.strip()]
-            body_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
-            for line in lines[:4]:
-                line = line.lstrip('•-*🔹').strip()
-                if line:
-                    body_text += f"• {line}\n"
-
-            footer = f"\n🔗 <b>ប្រភព:</b> {domain} | 📅 {date_str}\n{hashtags}"
-            summary = f"{header}{body_text}{footer}"[:1020]
-
-            keyboard = []
-            # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
-            if "សង្គ្រាម" in art.get('categories', []):
-                from categorizer import get_conflict_map_info
-                map_info = get_conflict_map_info(text=f"{title} {km_title} {km_text}", url=url)
-                if map_info:
-                    keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
-            keyboard.append([InlineKeyboardButton("🔗 អានបន្ត (Read More)", url=url)])
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            summary, reply_markup = format_article_message(
+                km_title=km_title,
+                km_text=km_text,
+                url=url,
+                analysis=analysis,
+            )
 
             image_url = art.get('image_url')
             image_bytes = None
             if image_url:
                 await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
                 try:
-                    def fetch():
+                    def fetch(_url=image_url):  # default arg avoids closure capture bug
                         with get_scraper() as s:
-                            r = s.get(image_url, timeout=8)
+                            r = s.get(_url, timeout=8)
                             return r.content if r.status_code == 200 else None
                     image_bytes = await asyncio.to_thread(fetch)
                 except Exception:
@@ -585,9 +550,9 @@ async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
                 'summary': summary,
                 'image_url': image_url,
                 'categories': art.get('categories', []),
-                'hashtags': hashtags,
+                'hashtags': analysis.get('hashtags', ''),
                 'reply_markup': reply_markup,
-                'image_bytes': image_bytes
+                'image_bytes': image_bytes,
             }])
 
             if image_bytes:
@@ -598,6 +563,7 @@ async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
             await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"Failed to send article to {chat_id}: {e}")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles all inline button clicks with debounce and rate-limiting."""
