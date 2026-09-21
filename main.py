@@ -295,7 +295,7 @@ async def send_daily_digest(bot: Bot):
         for url in urls[:2]:
             articles = await get_new_articles(url)
             for art in articles[:2]:
-                title = await asyncio.to_thread(translate_text, art['en_title'], 'km')
+                title = await asyncio.to_thread(translate_text, art.get('title', art.get('en_title', 'ព័ត៌មានថ្មី')), 'km')
                 digest_text += f"🔹 <a href='{art['url']}'>{title}</a>\n"
                 articles_added += 1
                 
@@ -360,7 +360,7 @@ async def main():
     
     application.add_handler(CommandHandler("start", bot_module.start))
     application.add_handler(CommandHandler("stop", bot_module.stop))
-    application.add_handler(CommandHandler("status", bot_module.status))
+    application.add_handler(CommandHandler("admin", bot_module.admin))
     application.add_handler(CommandHandler("broadcast", bot_module.broadcast))
     application.add_handler(CommandHandler("addurl", bot_module.addurl))
     application.add_handler(CommandHandler("removeurl", bot_module.removeurl))
@@ -389,7 +389,17 @@ async def main():
     logger.info("System fully operational!")
     
     # Keep the main process alive
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        logger.info("Shutting down gracefully...")
+        try:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        except Exception:
+            pass
+        await runner.cleanup()
 
 if __name__ == '__main__':
     try:

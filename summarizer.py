@@ -1,4 +1,6 @@
 import logging
+import math
+import re
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
@@ -17,8 +19,6 @@ try:
 except LookupError:
     nltk.download('stopwords')
 
-import math
-
 BOILERPLATE_PATTERNS = [
     r'click here', r'subscribe', r'read more', r'follow us', r'all rights reserved',
     r'photo by', r'image source', r'copyright \d{4}', r'sign up for', r'download our app',
@@ -34,8 +34,6 @@ def is_boilerplate(sentence: str) -> bool:
         if re.search(pat, s_lower):
             return True
     return False
-
-import re
 
 def extractive_summary(text: str, sentences_count: int = 4) -> str:
     """

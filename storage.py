@@ -291,6 +291,15 @@ async def toggle_user_category(chat_id: int, category: str) -> bool:
             
     return added
 
+async def get_category_stats() -> dict:
+    """Returns {category: user_count} for admin dashboard."""
+    all_prefs = await get_all_user_categories()
+    stats = {}
+    for chat_id, cats in all_prefs.items():
+        for cat in cats:
+            stats[cat] = stats.get(cat, 0) + 1
+    return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
+
 # --- STATS ---
 async def get_stats() -> dict:
     try:

@@ -19,6 +19,8 @@ from extractor import get_new_articles
 from translator import translate_text
 from summarizer import extractive_summary
 from categorizer import CATEGORIES, categorize_article, analyze_article_metadata
+import time
+_bot_start_time = time.time()
 
 # Setup logging
 logging.basicConfig(
@@ -47,6 +49,19 @@ async def on_startup(app: Application):
             BotCommand("stop", "ឈប់ទទួលព័ត៌មាន (Stop)")
         ]
         await app.bot.set_my_commands(commands)
+        from telegram import BotCommandScopeChat
+        admin_commands = [
+            BotCommand("admin", "📊 Analytics Dashboard"),
+            BotCommand("broadcast", "📢 Broadcast to all users"),
+            BotCommand("addurl", "➕ Add news source URL"),
+            BotCommand("removeurl", "🗑 Remove news source URL"),
+            BotCommand("listurls", "🌐 List tracked URLs"),
+        ]
+        if ADMIN_CHAT_ID:
+            try:
+                await app.bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=int(ADMIN_CHAT_ID)))
+            except Exception:
+                pass
         logger.info("Successfully registered bot command menu!")
     except Exception as e:
         logger.error(f"Failed to set bot commands: {e}")
@@ -73,25 +88,61 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Unsubscribe the user."""
     chat_id = update.effective_chat.id
     await storage.remove_subscriber(chat_id)
-    await update.message.reply_text("You have been unsubscribed.")
+    await update.message.reply_text("✅ អ្នកបានឈប់ទទួលព័ត៌មានជោគជ័យ។\n\nវាយ /start ដើម្បីចាប់ផ្ដើមម្ដងទៀត។", parse_mode='HTML')
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin status command."""
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rich Admin Analytics Dashboard."""
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("⛔ Unauthorized.")
         return
-        
-    subs_list = await storage.get_subscribers()
-    subs = len(subs_list)
-    sent = await storage.get_sent_articles_count()
-    
-    status_msg = (
-        f"Bot Status:\n"
-        f"- Subscribers: {subs}\n"
-        f"- Articles Sent: {sent}\n"
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    # Gather all stats concurrently
+    subs_list, sent_count, urls, cat_stats = await asyncio.gather(
+        storage.get_subscribers(),
+        storage.get_sent_articles_count(),
+        storage.get_base_urls(),
+        storage.get_category_stats(),
     )
-    await update.message.reply_text(status_msg)
+
+    # Uptime
+    uptime_secs = int(time.time() - _bot_start_time)
+    hours, rem = divmod(uptime_secs, 3600)
+    minutes = rem // 60
+    uptime_str = f"{hours}h {minutes}m"
+
+    # Memory
+    mem_str = "N/A"
+    try:
+        import psutil, os as _os
+        proc = psutil.Process(_os.getpid())
+        mem_mb = proc.memory_info().rss / 1024 / 1024
+        mem_str = f"{mem_mb:.1f} MB"
+    except Exception:
+        pass
+
+    # Category breakdown
+    cat_lines = ""
+    for cat, count in list(cat_stats.items())[:6]:
+        cat_lines += f"  • {cat} — {count} users\n"
+    if not cat_lines:
+        cat_lines = "  មិនទាន់មានទិន្នន័យ (No data yet)\n"
+
+    text = (
+        f"💼 <b>Admin Analytics Dashboard</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>Subscribers:</b> {len(subs_list)}\n"
+        f"📰 <b>Articles Sent:</b> {sent_count}\n"
+        f"🌐 <b>Sources Tracked:</b> {len(urls)}\n"
+        f"⏱ <b>Uptime:</b> {uptime_str}\n"
+        f"🧠 <b>Memory:</b> {mem_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📂 <b>Category Breakdown:</b>\n"
+        f"{cat_lines}"
+    )
+    await update.message.reply_text(text, parse_mode='HTML')
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to send a message to all subscribers."""
@@ -111,8 +162,10 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=sub_id, text=f"📢 <b>Announcement</b>\n\n{message}", parse_mode='HTML')
             sent += 1
-        except Exception:
-            pass
+        except Exception as e:
+            err = str(e).lower()
+            if 'blocked' in err or 'deactivated' in err or 'not found' in err:
+                await storage.remove_subscriber(sub_id)
             
     await update.message.reply_text(f"Broadcast successfully sent to {sent} subscribers.")
 
@@ -258,6 +311,9 @@ async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def listurls(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all tracked URLs."""
+    if str(update.effective_chat.id) != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
     urls = await storage.get_base_urls()
     if BASE_URL and BASE_URL not in urls:
         urls.append(BASE_URL)
@@ -378,7 +434,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
-    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("broadcast", broadcast))
     application.add_handler(CommandHandler("addurl", addurl))
     application.add_handler(CommandHandler("removeurl", removeurl))
