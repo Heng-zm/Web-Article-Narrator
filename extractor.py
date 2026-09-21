@@ -9,6 +9,7 @@ import asyncio
 from requests.adapters import HTTPAdapter
 import feedparser
 from duckduckgo_search import DDGS
+import re
 import warnings
 
 # Suppress the harmless duckduckgo_search renaming warning
@@ -96,9 +97,17 @@ async def fetch_url(url: str) -> str:
         logger.error(f"Failed to fetch {url}: {e}")
         return None
 
+def sanitize_html(html: str) -> str:
+    """Remove NULL bytes and XML-incompatible control characters from HTML."""
+    if not html:
+        return html
+    # Strip NULL bytes and C0/C1 control chars except tab, newline, carriage return
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', html)
+
 def extract_article_text(html: str) -> str:
     """Extracts article text from HTML using trafilatura, fallback to readability."""
     try:
+        html = sanitize_html(html)
         text = trafilatura.extract(html, include_links=False, include_images=False, include_comments=False)
         if text:
             return text
