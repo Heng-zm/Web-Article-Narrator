@@ -327,7 +327,14 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     summary = f"{header}{clean_km_text.strip()}\n\n{footer}"
     
-    keyboard = [[InlineKeyboardButton("🔗 អានដើម (Read Original)", url=url)]]
+    keyboard = []
+    # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
+    if "សង្គ្រាម" in analysis.get('categories', []):
+        from categorizer import get_conflict_map_info
+        map_info = get_conflict_map_info(text=f"{title} {km_title} {raw_km_text}", url=url)
+        if map_info:
+            keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
+    keyboard.append([InlineKeyboardButton("🔗 អានដើម (Read Original)", url=url)])
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # 5. Fetch Image with upload action indicator
@@ -562,7 +569,14 @@ async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
             footer = f"\n🔗 <b>ប្រភព:</b> {domain} | 📅 {date_str}\n{hashtags}"
             summary = f"{header}{body_text}{footer}"[:1020]
 
-            keyboard = [[InlineKeyboardButton("🔗 អានបន្ត (Read More)", url=url)]]
+            keyboard = []
+            # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
+            if "សង្គ្រាម" in art.get('categories', []):
+                from categorizer import get_conflict_map_info
+                map_info = get_conflict_map_info(text=f"{title} {km_title} {km_text}", url=url)
+                if map_info:
+                    keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
+            keyboard.append([InlineKeyboardButton("🔗 អានបន្ត (Read More)", url=url)])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             image_url = art.get('image_url')

@@ -284,6 +284,14 @@ async def process_articles(bot: Bot):
             keyboard = []
             if article.get('telegraph_url'):
                 keyboard.append([InlineKeyboardButton("⚡ អានអត្ថបទពេញ (Instant View)", url=article['telegraph_url'])])
+                
+            # Conflict Map Button - ONLY FOR CATEGORY 'សង្គ្រាម'
+            if "សង្គ្រាម" in article_cats:
+                from categorizer import get_conflict_map_info
+                map_info = get_conflict_map_info(text=f"{article.get('title', '')} {raw_km_text}", url=url)
+                if map_info:
+                    keyboard.append([InlineKeyboardButton(map_info['label'], url=map_info['url'])])
+                    
             keyboard.append([InlineKeyboardButton("🔗 អានប្រភពដើម (Read Original)", url=url)])
             reply_markup = InlineKeyboardMarkup(keyboard)
 

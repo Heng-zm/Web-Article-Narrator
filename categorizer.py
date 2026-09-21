@@ -127,3 +127,104 @@ def categorize_article(km_text: str, en_title: str) -> list:
     """Backwards-compatible wrapper returning list of categories."""
     result = analyze_article_metadata(km_text=km_text, en_title=en_title)
     return result["categories"]
+
+import urllib.parse
+
+CONFLICT_LOCATIONS = {
+    # Ukraine / Russia Conflict
+    "Pokrovsk": ["pokrovsk", "ប៉ូក្រូវស្ក៍", "ប៉ូក្រូវ"],
+    "Kharkiv": ["kharkiv", "ខារគីវ", "ខាគីវ"],
+    "Kursk": ["kursk", "គូស្ក៍", "ឃឺស"],
+    "Bakhmut": ["bakhmut", "បាក់មូត"],
+    "Avdiivka": ["avdiivka", "អាវឌីវកា"],
+    "Zaporizhzhia": ["zaporizhzhia", "ហ្សាផូរីហ្សា"],
+    "Kherson": ["kherson", "ខឺសុន"],
+    "Donetsk": ["donetsk", "ដូណេតស្ក៍", "ដូណេត"],
+    "Luhansk": ["luhansk", "លូហានស្ក៍"],
+    "Crimea": ["crimea", "គ្រីមៀ"],
+    "Belgorod": ["belgorod", "ប៊ែលហ្គោរ៉ូដ"],
+    "Odesa": ["odesa", "odessa", "អូដេសា"],
+    "Kyiv": ["kyiv", "kiev", "គៀវ"],
+    "Kupyansk": ["kupyansk", "គូព្យានស្ក៍"],
+    "Chasiv Yar": ["chasiv yar", "ឆាស៊ីវយ៉ា"],
+    "Toretsk": ["toretsk", "តូរេតស្ក៍"],
+    "Vuhledar": ["vuhledar", "វូឡេដា"],
+    "Sumy": ["sumy", "ស៊ូមី"],
+    "Black Sea": ["black sea", "សមុទ្រខ្មៅ"],
+    
+    # Middle East Conflict
+    "Gaza Strip": ["gaza", "ហ្កាហ្សា", "ហ្គាហ្សា"],
+    "Rafah": ["rafah", "រ៉ាហ្វា"],
+    "Khan Younis": ["khan younis", "ខាន់យូនីស"],
+    "Beirut": ["beirut", "ប៊ែរូត"],
+    "Southern Lebanon": ["lebanon", "លីបង់", "hezbollah"],
+    "Tel Aviv": ["tel aviv", "តែលអាវីវ"],
+    "Jerusalem": ["jerusalem", "ហ្ស៊េរុយសាឡិម"],
+    "West Bank": ["west bank", "វេសប៊ែង"],
+    "Tehran": ["tehran", "តេអេរ៉ង់", "iran"],
+    "Damascus": ["damascus", "syria", "ស៊ីរី", "ដាម៉ាស់"],
+    "Red Sea": ["red sea", "សមុទ្រក្រហម", "yemen", "houthi", "យេម៉ែន"],
+    
+    # Other Conflict Hotspots
+    "Taiwan Strait": ["taiwan", "តៃវ៉ាន់", "ច្រកសមុទ្រតៃវ៉ាន់"],
+    "South China Sea": ["south china sea", "សមុទ្រចិនខាងត្បូង"],
+    "Sudan": ["sudan", "khartum", "ស៊ូដង់"],
+    "Myanmar": ["myanmar", "burma", "មីយ៉ាន់ម៉ា"]
+}
+
+def get_conflict_map_info(text: str = "", url: str = "") -> dict:
+    """
+    Extracts conflict geographic location and builds an interactive map link.
+    ONLY intended to be called for Category 'សង្គ្រាម'.
+    """
+    text_lower = (text or "").lower()
+    url_lower = (url or "").lower()
+    
+    # 1. If source already is a map intelligence provider
+    if "liveuamap.com" in url_lower:
+        return {
+            "label": "🗺️ ពិនិត្យលើផែនទីសង្គ្រាម (Liveuamap)",
+            "url": "https://liveuamap.com"
+        }
+    if "deepstatemap.live" in url_lower:
+        return {
+            "label": "🗺️ ពិនិត្យលើផែនទីយុទ្ធសាស្ត្រ (DeepState)",
+            "url": "https://deepstatemap.live"
+        }
+        
+    # 2. Check for specific conflict city/hotspot
+    for location, keywords in CONFLICT_LOCATIONS.items():
+        for kw in keywords:
+            kw_clean = kw.lower()
+            if re.match(r'^[a-z0-9\s]+$', kw_clean):
+                if re.search(rf"\b{re.escape(kw_clean)}\b", text_lower):
+                    encoded = urllib.parse.quote(f"{location} war map")
+                    return {
+                        "label": f"🗺️ ពិនិត្យទីតាំងលើផែនទី ({location})",
+                        "url": f"https://www.google.com/maps/search/?api=1&query={encoded}"
+                    }
+            else:
+                if kw_clean in text_lower:
+                    encoded = urllib.parse.quote(f"{location} war map")
+                    return {
+                        "label": f"🗺️ ពិនិត្យទីតាំងលើផែនទី ({location})",
+                        "url": f"https://www.google.com/maps/search/?api=1&query={encoded}"
+                    }
+                    
+    # 3. Fallback for war articles without specific city
+    if any(k in text_lower for k in ["ukraine", "russia", "អ៊ុយក្រែន", "រុស្ស៊ី", "kyiv", "moscow"]):
+        return {
+            "label": "🗺️ ពិនិត្យលើផែនទីសមរភូមិ (Ukraine Conflict Map)",
+            "url": "https://liveuamap.com"
+        }
+    if any(k in text_lower for k in ["israel", "gaza", "palestine", "អ៊ីស្រាអែល", "ហាម៉ាស់", "hezbollah"]):
+        return {
+            "label": "🗺️ ពិនិត្យលើផែនទីសមរភូមិ (Middle East Conflict Map)",
+            "url": "https://israelpalestine.liveuamap.com"
+        }
+        
+    return {
+        "label": "🗺️ ពិនិត្យទីតាំងជម្លោះ (Global Conflict Map)",
+        "url": "https://www.cfr.org/global-conflict-tracker"
+    }
+
