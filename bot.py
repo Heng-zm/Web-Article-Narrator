@@ -72,10 +72,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Subscribe the user and prompt categories."""
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
-    
+
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     await storage.add_subscriber(chat_id)
-    
+
     welcome_text = (
         f"🌟 <b>សួស្តី {user_name}!</b> 🌟\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -100,14 +100,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(welcome_text, parse_mode='HTML')
-    # Automatically show category selection menu so the bot "knows" the user
+    # Automatically show category selection menu
     await categories_menu(update, context)
+
+    # Schedule a follow-up nudge in 30s for users who close the menu without confirming
+    async def _nudge_categories():
+        await asyncio.sleep(30)
+        user_cats = await storage.get_user_categories(chat_id)
+        if not user_cats:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "💡 <b>គន្លឹះ:</b> អ្នកនៅមិនទាន់ជ្រើសរើសប្រភេទព័ត៌មានទេ!\n\n"
+                        "ចុច /categories ដើម្បីជ្រើសរើស ហើយទទួលបានតែព័ត៌មានដែលអ្នកចូលចិត្ត 🎯"
+                    ),
+                    parse_mode='HTML',
+                )
+            except Exception:
+                pass  # User may have blocked the bot
+
+    asyncio.create_task(_nudge_categories())
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Unsubscribe the user."""
     chat_id = update.effective_chat.id
     await storage.remove_subscriber(chat_id)
-    await update.message.reply_text("✅ អ្នកបានឈប់ទទួលព័ត៌មានជោគជ័យ។\n\nវាយ /start ដើម្បីចាប់ផ្ដើមម្ដងទៀត។", parse_mode='HTML')
+    await update.message.reply_text(
+        "✅ អ្នកបានឈប់ទទួលព័ត៌មានជោគជ័យ។\n\nវាយ /start ដើម្បីចាប់ផ្ដើមម្ដងទៀត។",
+        parse_mode='HTML',
+    )
+
+# /unsubscribe is a clean alias for /stop
+unsubscribe = stop
+
+
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rich Admin Analytics Dashboard."""
@@ -164,29 +191,57 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to send a message to all subscribers."""
+    """Admin command to send a message to all subscribers (rate-limited)."""
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_CHAT_ID:
         await update.message.reply_text("Unauthorized.")
         return
-        
+
     if not context.args:
         await update.message.reply_text("Usage: /broadcast <your message here>")
         return
-        
+
     message = " ".join(context.args)
     subs = await storage.get_subscribers()
+    if not subs:
+        await update.message.reply_text("No subscribers yet.")
+        return
+
+    status_msg = await update.message.reply_text(f"📢 Sending to {len(subs)} subscribers...")
+
+    sem = asyncio.Semaphore(10)  # max 10 concurrent sends
     sent = 0
-    for sub_id in subs:
-        try:
-            await context.bot.send_message(chat_id=sub_id, text=f"📢 <b>Announcement</b>\n\n{message}", parse_mode='HTML')
-            sent += 1
-        except Exception as e:
-            err = str(e).lower()
-            if 'blocked' in err or 'deactivated' in err or 'not found' in err:
-                await storage.remove_subscriber(sub_id)
-            
-    await update.message.reply_text(f"Broadcast successfully sent to {sent} subscribers.")
+    failed = 0
+
+    async def _send_one(sub_id):
+        nonlocal sent, failed
+        async with sem:
+            try:
+                await context.bot.send_message(
+                    chat_id=sub_id,
+                    text=f"📢 <b>Announcement</b>\n\n{message}",
+                    parse_mode='HTML',
+                )
+                sent += 1
+            except Exception as e:
+                failed += 1
+                err = str(e).lower()
+                if 'blocked' in err or 'deactivated' in err or 'not found' in err or 'forbidden' in err:
+                    await storage.remove_subscriber(sub_id)
+
+    batch_size = 25
+    for i in range(0, len(subs), batch_size):
+        batch = subs[i:i + batch_size]
+        await asyncio.gather(*[_send_one(s) for s in batch])
+        if i + batch_size < len(subs):
+            await asyncio.sleep(1.0)  # Telegram flood limit spacing
+
+    await status_msg.edit_text(
+        f"✅ Broadcast complete!\n\n"
+        f"📨 Sent: {sent}\n"
+        f"❌ Failed/removed: {failed}"
+    )
+
 
 async def addurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add one or multiple base URLs to scrape in bulk."""
@@ -231,28 +286,30 @@ async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to remove one or multiple base URLs."""
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("⛔ Unauthorized.")
+        await update.effective_message.reply_text("⛔ Unauthorized.")
         return
-        
-    raw_text = update.message.text or ""
+
+    msg = update.effective_message
+    raw_text = (msg.text if msg else None) or " ".join(context.args or [])
     found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
 
     if not found_urls and context.args:
         found_urls = context.args
-        
+
     if not found_urls:
-        await update.message.reply_text("Usage: /removeurl <url1> <url2> ...")
+        await msg.reply_text("Usage: /removeurl <url1> <url2> ...")
         return
-        
+
     clean_urls = list(dict.fromkeys([u.strip().rstrip('/') for u in found_urls]))
     removed = await storage.remove_base_urls(clean_urls)
-    
+
     if not removed:
-        await update.message.reply_text("⚠️ មិនមាន Link ណាត្រូវដកចេញទេ។")
+        await msg.reply_text("⚠️ មិនមាន Link ណាត្រូវដកចេញទេ។")
         return
-        
+
     reply = f"🗑 <b>បានដកចេញ ({len(removed)}) ប្រភពព័ត៌មាន:</b>\n" + "\n".join([f"  • {u}" for u in removed])
-    await update.message.reply_text(reply, parse_mode='HTML')
+    await msg.reply_text(reply, parse_mode='HTML')
+
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetch and send the latest article immediately."""

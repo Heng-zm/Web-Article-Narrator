@@ -1,5 +1,12 @@
-import os
 import sys
+try:
+    import pysqlite3
+    sys.modules["sqlite3"] = pysqlite3
+    sys.modules["_sqlite3"] = pysqlite3
+except ImportError:
+    pass
+
+import os
 import time
 # Add vendored packages for Wasmer Edge deployment
 if os.path.exists('packages'):
