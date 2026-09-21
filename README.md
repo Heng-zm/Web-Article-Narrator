@@ -4,7 +4,7 @@ A Telegram bot that monitors a fixed website, auto-translates new articles from 
 
 ## Features
 - **Idempotency**: Articles are saved in an SQLite DB so they are never sent twice.
-- **Auto-translate**: Uses `deep-translator` (Google Translate) for EN to KM translation.
+- **Auto-translate**: Uses `deep-translator` (Google Translate) for EN to KM translation.d
 - **Voice Narration**: Uses `gTTS` and `pydub` (requires ffmpeg) to generate Khmer voice notes.
 - **Smart Extraction**: Uses `trafilatura` (with `readability-lxml` fallback) and can handle both single article pages and listing pages.
 
