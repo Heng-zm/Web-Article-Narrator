@@ -83,19 +83,50 @@ def generate_hash(text: str) -> str:
     """Generates a SHA-256 hash for a given text (usually URL)."""
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
+_FALLBACK_USER_AGENTS = [
+    # Chrome on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    # Edge on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0',
+    # Firefox on Windows
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
+    # Chrome on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    # Safari on macOS
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+]
+
 def fetch_url_sync(url: str) -> str:
-    with get_scraper() as scraper:
-        response = scraper.get(url, timeout=15)
-        response.raise_for_status()
-        return response.text
+    """Fetches a URL with CloudScraper, retrying with rotated User-Agents on 403."""
+    import random
+    import requests
+
+    attempts = [None] + _FALLBACK_USER_AGENTS  # None = let CloudScraper pick its own UA first
+    for ua in attempts:
+        try:
+            with get_scraper() as scraper:
+                if ua:
+                    scraper.headers['User-Agent'] = ua
+                response = scraper.get(url, timeout=15)
+                response.raise_for_status()
+                return response.text
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                continue  # Try next UA
+            raise  # Non-403 HTTP errors are re-raised immediately
+    return None  # All UA attempts exhausted
 
 async def fetch_url(url: str) -> str:
     """Fetches HTML content of a URL asynchronously, bypassing Cloudflare."""
     try:
-        return await asyncio.to_thread(fetch_url_sync, url)
+        result = await asyncio.to_thread(fetch_url_sync, url)
+        if result is None:
+            logger.warning(f"All fetch attempts blocked (403) for {url} — skipping.")
+        return result
     except Exception as e:
-        logger.error(f"Failed to fetch {url}: {e}")
+        logger.warning(f"Failed to fetch {url}: {e}")
         return None
+
 
 def sanitize_html(html: str) -> str:
     """Remove NULL bytes and XML-incompatible control characters from HTML."""
