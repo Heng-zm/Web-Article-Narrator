@@ -115,27 +115,44 @@ def extract_article_text(html: str) -> str:
 
 def is_listing_page(html: str, base_url: str) -> list:
     """
-    Heuristic to determine if a page is a listing and return potential article links.
-    Returns a list of URLs if it's a listing, otherwise empty list.
+    Heuristic to extract fresh article links from a homepage or listing page.
+    Compatible with Khmer continuous text, English word boundaries, and news URL paths.
     """
     soup = BeautifulSoup(html, 'lxml')
     links = soup.find_all('a', href=True)
+    base_domain = urlparse(base_url).netloc.replace('www.', '')
     
-    article_links = set()
-    # Simple heuristic: if a link's text is long enough and href is on the same domain, it might be an article
+    article_links = []
+    seen = set()
+    excluded = ('/about', '/contact', '/privacy', '/terms', '/login', '/register', '/search', '/tag/', '/category/', '/author/')
+    
     for link in links:
-        href = link.get('href')
+        href = link.get('href', '').strip()
         text = link.get_text(strip=True)
-        if len(text.split()) > 4: # Likely a title
-            full_url = urljoin(base_url, href)
-            # Basic domain check, to avoid external links
-            if base_url.split('/')[2] in full_url:
-                article_links.add(full_url)
-                
-    # If we found multiple links that look like articles, it's a listing page
-    if len(article_links) > 2:
-        return list(article_links)
-    return []
+        if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+            continue
+            
+        full_url = urljoin(base_url, href).split('?')[0].split('#')[0].rstrip('/')
+        if full_url in seen or full_url == base_url.rstrip('/'):
+            continue
+            
+        link_domain = urlparse(full_url).netloc.replace('www.', '')
+        if base_domain not in link_domain:
+            continue
+            
+        path = urlparse(full_url).path.lower()
+        if any(ex in path for ex in excluded):
+            continue
+            
+        word_count = len(text.split())
+        char_count = len(text)
+        has_news_slug = bool(re.search(r'/(news|article|story|post|detail|\d{4}/\d{2}|\d+)/', path))
+        
+        if (word_count >= 3 or char_count >= 12 or has_news_slug) and char_count >= 6:
+            seen.add(full_url)
+            article_links.append(full_url)
+            
+    return article_links[:15]
 
 def extract_metadata(html: str, base_url: str) -> tuple:
     """Parses HTML once to extract both title and main image."""
@@ -163,96 +180,120 @@ def extract_metadata(html: str, base_url: str) -> tuple:
 
 async def get_new_articles(base_url: str) -> list:
     """
-    Main entry point for extraction.
-    Returns a list of dicts: [{'url': str, 'title': str, 'text': str, 'hash': str, 'image_url': str}]
+    Main entry point for real-time extraction.
+    Ultra-Fast & Resource-Efficient:
+    1. Checks RSS feed or HTML homepage.
+    2. Filters out already-sent articles in RAM BEFORE downloading full page HTML.
+    3. Only downloads full content for TRULY NEW articles.
     """
+    import storage
+    
     html = await fetch_url(base_url)
     if not html:
         return []
 
-    articles = []
-    
-    # Check if listing page
-    links = is_listing_page(html, base_url)
-    
     try:
-        # Check RSS first
-        rss_url = base_url.rstrip('/') + '/feed'
-        html = await fetch_url(rss_url)
-        
-        # Determine if it's actually XML/RSS
-        if html and ('<rss' in html or '<feed' in html):
-            logger.info(f"Found RSS feed for {base_url}")
-            feed = feedparser.parse(html)
-            
+        # 1. Check for RSS feed link in HTML head or default /feed
+        rss_candidates = []
+        soup = BeautifulSoup(html, 'lxml')
+        rss_meta = soup.find('link', type=lambda t: t and ('rss' in t or 'atom' in t))
+        if rss_meta and rss_meta.get('href'):
+            rss_candidates.append(urljoin(base_url, rss_meta['href']))
+        rss_candidates.append(base_url.rstrip('/') + '/feed')
+        rss_candidates.append(base_url.rstrip('/') + '/rss')
+
+        feed_data = None
+        for r_url in rss_candidates[:2]:
+            feed_xml = await fetch_url(r_url)
+            if feed_xml and ('<rss' in feed_xml or '<feed' in feed_xml):
+                feed_data = feedparser.parse(feed_xml)
+                if feed_data and feed_data.entries:
+                    break
+
+        # If RSS feed is available
+        if feed_data and feed_data.entries:
             articles = []
-            for entry in feed.entries[:3]:
-                link = entry.link
-                title = entry.title
-                text = entry.get('description', '')
+            for entry in feed_data.entries[:5]:
+                link = getattr(entry, 'link', None)
+                if not link:
+                    continue
+                clean_link = link.split('?')[0]
+                url_hash = generate_hash(clean_link)
+                # Skip in RAM if already sent!
+                if await storage.is_article_sent(url_hash):
+                    continue
+                    
+                title = getattr(entry, 'title', 'ព័ត៌មានថ្មី')
+                desc = getattr(entry, 'description', '')
                 
-                # Fetch to get proper image if needed
+                # Fetch full article HTML only for truly new ones
                 page_html = await fetch_url(link)
                 meta_title, image_url = extract_metadata(page_html, base_url) if page_html else (title, None)
-                article_text = extract_article_text(page_html) if page_html else text
+                article_text = extract_article_text(page_html) if page_html else desc
                 
                 articles.append({
                     'url': link,
                     'title': title,
-                    'text': article_text if article_text else text,
-                    'hash': generate_hash(link.split('?')[0]),
+                    'text': article_text if article_text else desc,
+                    'hash': url_hash,
                     'image_url': image_url
                 })
-            return articles
+            if articles:
+                return articles
 
-        # Fallback to HTML
-        logger.info(f"No RSS found, falling back to HTML scraping for {base_url}")
-        html = await fetch_url(base_url)
-        if not html:
-            return []
-
-        articles = []
-        
-        async def fetch_and_extract(link):
-            article_html = await fetch_url(link)
-            if article_html:
-                text = await asyncio.to_thread(extract_article_text, article_html)
-                title, image_url = await asyncio.to_thread(extract_metadata, article_html, link)
-                
-                if text and len(text) > 100: # Ensure it's not empty or tiny
-                    return {
-                        'url': link,
-                        'title': title,
-                        'text': text,
-                        'hash': generate_hash(link.split('?')[0]),
-                        'image_url': image_url
-                    }
-            return None
-
-        # Check if listing page
+        # 2. Fallback to HTML Listing Extraction with RAM pre-filtering
         links = is_listing_page(html, base_url)
-        
         if links:
-            logger.info(f"Detected listing page. Found {len(links)} potential articles.")
-            # Only process a few to avoid spamming if it's a huge listing
-            tasks = [fetch_and_extract(link) for link in links[:3]]
+            # Pre-filter: only keep links that have NOT been sent yet
+            unsent_links = []
+            for link in links:
+                h = generate_hash(link.split('?')[0])
+                if not await storage.is_article_sent(h):
+                    unsent_links.append(link)
+                    
+            if not unsent_links:
+                return []  # Zero new articles -> return instantly in 0.01s!
+                
+            logger.info(f"[{base_url}] Found {len(unsent_links)} brand new articles to process.")
+            
+            async def fetch_and_extract(link):
+                article_html = await fetch_url(link)
+                if article_html:
+                    text = await asyncio.to_thread(extract_article_text, article_html)
+                    title, image_url = await asyncio.to_thread(extract_metadata, article_html, link)
+                    if text and len(text) > 80:
+                        return {
+                            'url': link,
+                            'title': title,
+                            'text': text,
+                            'hash': generate_hash(link.split('?')[0]),
+                            'image_url': image_url
+                        }
+                return None
+
+            tasks = [fetch_and_extract(link) for link in unsent_links[:3]]
             results = await asyncio.gather(*tasks)
-            articles = [r for r in results if r is not None]
+            return [r for r in results if r is not None]
         else:
-            logger.info("Detected single article page.")
+            # Single article page
+            single_hash = generate_hash(base_url.split('?')[0])
+            if await storage.is_article_sent(single_hash):
+                return []
             text = await asyncio.to_thread(extract_article_text, html)
             title, image_url = await asyncio.to_thread(extract_metadata, html, base_url)
-            
-            if text and len(text) > 100:
-                articles.append({
+            if text and len(text) > 80:
+                return [{
                     'url': base_url,
                     'title': title,
                     'text': text,
-                    'hash': generate_hash(base_url),
+                    'hash': single_hash,
                     'image_url': image_url
-                })
-                
-        return articles
+                }]
+            return []
+
+    except Exception as e:
+        logger.error(f"Failed to extract new articles from {base_url}: {e}")
+        return []
 
     except Exception as e:
         logger.error(f"Failed to extract new articles: {e}")

@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 BASE_URL = os.environ.get('BASE_URL')
-CHECK_INTERVAL_MINUTES = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
+# Fast Real-time Polling: Check sources every 90 seconds (1.5 min) by default
+CHECK_INTERVAL_SECONDS = int(os.environ.get('CHECK_INTERVAL_SECONDS', 90))
 
 # ─────────────────────────────────────────────────
 # MULTI-USER CONCURRENCY CONTROLS
@@ -428,21 +429,25 @@ async def send_daily_digest(bot: Bot):
         logger.error(f"Failed to send digest: {e}")
 
 async def background_scheduler(bot: Bot):
-    """The original background polling loop."""
-    logger.info(f"Background scheduler started. Polling every {CHECK_INTERVAL_MINUTES} minutes.")
+    """Near-realtime background polling loop continuously watching for new articles."""
+    logger.info(f"Real-time background scheduler started. Monitoring sources every {CHECK_INTERVAL_SECONDS} seconds.")
     
     digest_sent_date = None
     
     while True:
-        now = datetime.now()
-        # Send Daily Digest at 8:00 AM Cambodia time (UTC+7 usually, assuming server is on same timezone)
-        if now.hour == 8 and now.minute < CHECK_INTERVAL_MINUTES:
-            if digest_sent_date != now.date():
-                await send_daily_digest(bot)
-                digest_sent_date = now.date()
-                
-        await process_articles(bot)
-        await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
+        try:
+            now = datetime.now()
+            # Send Daily Digest at 8:00 AM Cambodia time
+            if now.hour == 8 and now.minute < 3:
+                if digest_sent_date != now.date():
+                    await send_daily_digest(bot)
+                    digest_sent_date = now.date()
+                    
+            await process_articles(bot)
+        except Exception as e:
+            logger.error(f"Error in background scheduler cycle: {e}")
+            
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
     if not BOT_TOKEN:

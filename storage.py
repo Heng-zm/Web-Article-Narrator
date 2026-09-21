@@ -200,24 +200,46 @@ async def get_subscribers() -> list:
             logger.error(f"Failed to get subscribers: {e}")
             return []
 
-# --- SENT ARTICLES ---
-async def is_article_sent(url_hash: str) -> bool:
+# --- SENT ARTICLES (IN-MEMORY CACHED FOR HIGH-SPEED POLLING) ---
+_sent_articles_cache = None
+
+async def init_sent_articles_cache():
+    global _sent_articles_cache
+    if _sent_articles_cache is not None:
+        return
+    _sent_articles_cache = set()
     if USE_SUPABASE:
         try:
-            res = await asyncio.to_thread(lambda: _supabase.table('sent_articles').select('url_hash').eq('url_hash', url_hash).execute())
-            return len(res.data) > 0
+            res = await asyncio.to_thread(lambda: _supabase.table('sent_articles').select('url_hash').execute())
+            if res.data:
+                _sent_articles_cache = {r['url_hash'] for r in res.data}
+                logger.info(f"Preloaded {len(_sent_articles_cache)} sent articles from Supabase into RAM.")
         except Exception as e:
-            logger.error(f"Supabase is_article_sent error: {e}")
-            return False
+            logger.error(f"Failed to preload sent_articles from Supabase: {e}")
     else:
         try:
-            async with _conn.execute('SELECT 1 FROM sent_articles WHERE url_hash = ?', (url_hash,)) as cursor:
-                record = await cursor.fetchone()
-                return bool(record)
+            if _conn is None:
+                await init_db()
+            async with _conn.execute('SELECT url_hash FROM sent_articles') as cursor:
+                records = await cursor.fetchall()
+                _sent_articles_cache = {r[0] for r in records}
+                logger.info(f"Preloaded {len(_sent_articles_cache)} sent articles from SQLite into RAM.")
         except Exception as e:
-            return False
+            logger.error(f"Failed to preload sent_articles from SQLite: {e}")
+
+async def is_article_sent(url_hash: str) -> bool:
+    global _sent_articles_cache
+    if _sent_articles_cache is None:
+        await init_sent_articles_cache()
+    if _sent_articles_cache is not None and url_hash in _sent_articles_cache:
+        return True
+    return False
 
 async def mark_article_sent(url_hash: str):
+    global _sent_articles_cache
+    if _sent_articles_cache is None:
+        _sent_articles_cache = set()
+    _sent_articles_cache.add(url_hash)
     if USE_SUPABASE:
         try:
             await asyncio.to_thread(lambda: _supabase.table('sent_articles').upsert({'url_hash': url_hash}).execute())
@@ -225,6 +247,8 @@ async def mark_article_sent(url_hash: str):
             logger.error(f"Supabase mark_article_sent error: {e}")
     else:
         try:
+            if _conn is None:
+                await init_db()
             await _conn.execute('INSERT OR IGNORE INTO sent_articles (url_hash) VALUES (?)', (url_hash,))
             await _conn.commit()
         except Exception as e:
