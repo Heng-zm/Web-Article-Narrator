@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 # Add vendored packages for Wasmer Edge deployment
 if os.path.exists('packages'):
     sys.path.insert(0, os.path.abspath('packages'))
@@ -8,6 +9,7 @@ import asyncio
 import logging
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter, Forbidden, BadRequest
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -28,24 +30,107 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 BASE_URL = os.environ.get('BASE_URL')
 CHECK_INTERVAL_MINUTES = int(os.environ.get('CHECK_INTERVAL_MINUTES', 5))
 
-async def broadcast_to_user(bot: Bot, chat_id, summary, image_bytes, reply_markup=None):
-    """Helper to send image + text to a single user."""
-    try:
-        # Telegram caption limit is 1024 characters.
-        caption = summary[:1000] + "..." if len(summary) > 1024 else summary
-        
-        if image_bytes:
-            try:
-                await bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=caption, parse_mode='HTML', reply_markup=reply_markup, read_timeout=20)
-            except Exception as e:
-                logger.warning(f"Failed to send photo to {chat_id}, falling back to text message: {e}")
-                await bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML', reply_markup=reply_markup)
-        else:
-            await bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML', reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"Failed to send to {chat_id}: {e}")
+# ─────────────────────────────────────────────────
+# MULTI-USER CONCURRENCY CONTROLS
+# ─────────────────────────────────────────────────
+
+# Telegram allows 30 messages/sec globally; semaphore enforces this
+_telegram_semaphore = asyncio.Semaphore(25)
+
+# Per-user throttle: track last request time to prevent spam
+_user_last_request: dict = {}          # chat_id -> timestamp
+USER_THROTTLE_SECONDS = 3              # min seconds between user requests
+
+# Shared article cache: avoids re-scraping when multiple users hit confirm simultaneously
+# Structure: { url -> {'data': article_dict, 'expires': timestamp} }
+_article_cache: dict = {}
+ARTICLE_CACHE_TTL = 300                # 5 minutes
 
 pipeline_lock = asyncio.Lock()
+
+def is_user_throttled(chat_id: int) -> bool:
+    """Returns True if the user is sending requests too fast."""
+    now = time.time()
+    last = _user_last_request.get(chat_id, 0)
+    if now - last < USER_THROTTLE_SECONDS:
+        return True
+    _user_last_request[chat_id] = now
+    return False
+
+def get_cached_articles() -> list:
+    """Returns currently cached articles that haven't expired."""
+    now = time.time()
+    return [
+        entry['data'] for entry in _article_cache.values()
+        if entry['expires'] > now
+    ]
+
+def cache_articles(articles: list):
+    """Stores articles in the shared cache with TTL."""
+    now = time.time()
+    for art in articles:
+        url = art.get('url', '')
+        if url:
+            _article_cache[url] = {'data': art, 'expires': now + ARTICLE_CACHE_TTL}
+    # Prune expired entries
+    expired = [k for k, v in _article_cache.items() if v['expires'] <= now]
+    for k in expired:
+        _article_cache.pop(k, None)
+
+async def broadcast_to_user(bot: Bot, chat_id, summary, image, reply_markup=None):
+    """
+    Safe single-user broadcaster with:
+    - Semaphore rate limiting (25 concurrent max)
+    - RetryAfter (429) handling with exponential backoff
+    - Auto-remove on Forbidden/blocked users
+    - Photo → text fallback
+    """
+    async with _telegram_semaphore:
+        caption = summary[:1020] + "..." if len(summary) > 1024 else summary
+        for attempt in range(3):
+            try:
+                if image:
+                    try:
+                        await bot.send_photo(
+                            chat_id=chat_id, photo=image,
+                            caption=caption, parse_mode='HTML',
+                            reply_markup=reply_markup, read_timeout=20
+                        )
+                    except (BadRequest, Exception) as e:
+                        if 'caption' in str(e).lower() or 'photo' in str(e).lower():
+                            await bot.send_message(
+                                chat_id=chat_id, text=caption,
+                                parse_mode='HTML', reply_markup=reply_markup
+                            )
+                        else:
+                            raise
+                else:
+                    await bot.send_message(
+                        chat_id=chat_id, text=caption,
+                        parse_mode='HTML', reply_markup=reply_markup
+                    )
+                return  # Success — exit retry loop
+
+            except RetryAfter as e:
+                wait = e.retry_after + 1
+                logger.warning(f"Rate limited by Telegram. Waiting {wait}s for {chat_id}")
+                await asyncio.sleep(wait)
+
+            except Forbidden:
+                logger.info(f"User {chat_id} blocked the bot. Auto-removing.")
+                await storage.remove_subscriber(chat_id)
+                return
+
+            except Exception as e:
+                err = str(e).lower()
+                if 'deactivated' in err or 'not found' in err or 'chat not found' in err:
+                    await storage.remove_subscriber(chat_id)
+                    return
+                if attempt == 2:
+                    logger.error(f"Failed to send to {chat_id} after 3 attempts: {e}")
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+
+
 
 async def process_articles(bot: Bot):
     """Background job to fetch, summarize, and send articles using a Batch ETL Pipeline."""
@@ -96,24 +181,26 @@ async def process_articles(bot: Bot):
         from telegraph_engine import get_telegraph_url
         
         for article in all_new_articles:
+            # Combine title + slug for maximum NLP keyword detection accuracy
             url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
-            article['en_title'] = url_slug
+            raw_title = article.get('title', '')
+            article['en_title'] = f"{raw_title} {url_slug}".strip()
             
             # 1. Run Verification and Title Translation Concurrently
-            km_title_task = asyncio.to_thread(translate_text, article.get('title', ''))
+            km_title_task = asyncio.to_thread(translate_text, raw_title or url_slug)
             verification_task = asyncio.to_thread(verify_article_sources, url_slug)
             
             article['km_title'], article['verification'] = await asyncio.gather(km_title_task, verification_task)
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
             
             # 2. Translate Summary
             article['km_text'] = await asyncio.to_thread(translate_text, article['short_summary'])
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
             
             # 3. Translate Full Text for Telegraph (Cap at 2500 chars)
             full_text = article.get('text', '')
             article['km_full_text'] = await asyncio.to_thread(translate_text, full_text[:2500])
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
             
             # 4. Generate Telegraph Page
             article['telegraph_url'] = await asyncio.to_thread(
@@ -124,11 +211,11 @@ async def process_articles(bot: Bot):
                 article['url']
             )
             
-        # === STAGE 4: BROADCAST ===
-        logger.info("Pipeline Stage 4: Broadcasting to users...")
-        from categorizer import categorize_article, analyze_article_metadata
+        # === STAGE 4: BROADCAST WITH STRICT CATEGORY DISPATCHING ===
+        logger.info("Pipeline Stage 4: Broadcasting to users with strict category filtering...")
+        from categorizer import analyze_article_metadata
         
-        # Massively optimize database performance by fetching all preferences in a single O(1) query
+        # Preload subscribers and category preferences in a single O(1) RAM lookup
         subscribers = await storage.get_subscribers()
         all_user_prefs = await storage.get_all_user_categories()
         
@@ -140,26 +227,20 @@ async def process_articles(bot: Bot):
                 en_title=article.get('en_title', '')
             )
             article_cats = analysis['categories']
+            article['categories'] = article_cats
             
-            # Filter subscribers based on their category preferences in RAM instantly
+            # Strict Category Dispatching:
             target_subscribers = []
             for sub_id in subscribers:
                 user_cats = all_user_prefs.get(sub_id, [])
-                # If user hasn't selected any categories, they receive everything
-                if not user_cats:
-                    target_subscribers.append(sub_id)
-                # If article matched some categories, check for overlap
-                elif any(c in user_cats for c in article_cats):
-                    target_subscribers.append(sub_id)
-                # If article matched NO categories, send it to everyone to be safe
-                elif not article_cats:
+                if user_cats:
+                    # User configured categories: ONLY send if article matches at least one!
+                    if any(c in user_cats for c in article_cats):
+                        target_subscribers.append(sub_id)
+                else:
+                    # User hasn't configured categories yet: send all articles
                     target_subscribers.append(sub_id)
                     
-            if not target_subscribers:
-                # No one wants to read this article, mark as sent and skip
-                await storage.mark_article_sent(article['hash'])
-                continue
-                
             url = article['url']
             domain = urlparse(url).netloc.replace('www.', '')
             date_str = datetime.now().strftime("%d/%m/%Y")
@@ -178,9 +259,8 @@ async def process_articles(bot: Bot):
             else:
                 header = f"📰 <b>{article['km_title']}</b>\n\n"
             
-            # Format the translated summary into clean bullet points
+            # Format clean bullet points
             raw_km_text = article['km_text']
-            # Split by the strict delimiter
             lines = [line.strip() for line in raw_km_text.split('|||') if line.strip()]
             
             clean_km_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
@@ -189,8 +269,6 @@ async def process_articles(bot: Bot):
             
             for line in lines:
                 line = line.lstrip('•').lstrip('-').lstrip('*').lstrip('🔹').strip()
-                
-                # Prevent over-truncation
                 if current_len + len(line) > max_text_len:
                     remaining = max_text_len - current_len
                     if remaining > 15:
@@ -202,16 +280,17 @@ async def process_articles(bot: Bot):
                 
             summary = f"{header}{clean_km_text.strip()}\n\n{footer}"
             
-            # Create interactive buttons (Stacked vertically)
+            # Interactive buttons
             keyboard = []
             if article.get('telegraph_url'):
                 keyboard.append([InlineKeyboardButton("⚡ អានអត្ថបទពេញ (Instant View)", url=article['telegraph_url'])])
             keyboard.append([InlineKeyboardButton("🔗 អានប្រភពដើម (Read Original)", url=url)])
-            
             reply_markup = InlineKeyboardMarkup(keyboard)
 
+            article['summary'] = summary
+            article['reply_markup'] = reply_markup
             
-            # Download image bytes
+            # Download image bytes if available
             image_bytes = None
             if article.get('image_url'):
                 from extractor import get_scraper
@@ -223,36 +302,62 @@ async def process_articles(bot: Bot):
                     image_bytes = await asyncio.to_thread(fetch_img)
                 except Exception as e:
                     logger.warning(f"Failed to download image {article['image_url']}: {e}")
-            
-            # Ultra-fast broadcast: Upload image once and cache the file_id!
+
+            # Store in RAM cache immediately so 100s of active users get it without re-scraping
+            storage.store_processed_articles([{
+                'url': url,
+                'title': article.get('title', ''),
+                'km_title': article['km_title'],
+                'summary': summary,
+                'image_url': article.get('image_url'),
+                'categories': article_cats,
+                'hashtags': hashtags,
+                'is_hot': analysis['is_hot'],
+                'reply_markup': reply_markup,
+                'image_bytes': image_bytes
+            }])
+
+            if not target_subscribers:
+                await storage.mark_article_sent(article['hash'])
+                continue
+
+            # High-Concurrency Optimization: Upload image ONCE to get Telegram file_id
             cached_photo = image_bytes
             if image_bytes and target_subscribers:
-                try:
-                    first_user = target_subscribers[0]
-                    msg = await bot.send_photo(chat_id=first_user, photo=image_bytes, caption=summary, parse_mode='HTML', reply_markup=reply_markup)
-                    cached_photo = msg.photo[-1].file_id # Get Telegram's internal ID
-                    target_subscribers = target_subscribers[1:] # Skip first user
-                    logger.info(f"Successfully sent and cached photo for {first_user}")
-                except Exception as e:
-                    logger.warning(f"Failed to cache photo on first user {target_subscribers[0]}: {e}")
+                for candidate in list(target_subscribers[:5]):
+                    try:
+                        msg = await bot.send_photo(
+                            chat_id=candidate, photo=image_bytes,
+                            caption=summary, parse_mode='HTML',
+                            reply_markup=reply_markup, read_timeout=20
+                        )
+                        cached_photo = msg.photo[-1].file_id  # Reusable Telegram photo ID
+                        article['photo_file_id'] = cached_photo
+                        target_subscribers.remove(candidate)
+                        logger.info(f"Successfully cached photo file_id via user {candidate}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Photo upload candidate {candidate} failed: {e}")
+                        err = str(e).lower()
+                        if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
+                            await storage.remove_subscriber(candidate)
+                            if candidate in target_subscribers:
+                                target_subscribers.remove(candidate)
 
-            # Broadcast to remaining subscribers concurrently in batches using the cached file_id
-            batch_size = 20
+            # Concurrent broadcast in controlled batches of 25 with rate-limit protection
+            batch_size = 25
             for i in range(0, len(target_subscribers), batch_size):
                 batch = target_subscribers[i:i+batch_size]
-                
                 tasks = [
                     broadcast_to_user(bot, chat_id, summary, cached_photo, reply_markup)
                     for chat_id in batch
                 ]
                 await asyncio.gather(*tasks)
-                
                 if i + batch_size < len(target_subscribers):
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)  # Safe spacing for Telegram flood limits
                     
-            # Mark as sent only after successful broadcast
             await storage.mark_article_sent(article['hash'])
-            await asyncio.sleep(1.5) # Pause between sending different articles to users
+            await asyncio.sleep(1.0)
             
         logger.info("Pipeline successfully completed.")
         

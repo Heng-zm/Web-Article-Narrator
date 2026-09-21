@@ -314,3 +314,66 @@ async def get_stats() -> dict:
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
         return {'subscribers': 0, 'articles': 0}
+
+# --- IN-MEMORY ARTICLE CACHE (INDEXED BY CATEGORY) ---
+_articles_by_category = {}  # category -> list of processed article dicts
+_all_recent_articles = []   # list of all recent article dicts (max 50)
+_user_last_action = {}      # chat_id -> timestamp
+
+def is_user_throttled(chat_id: int, min_interval_seconds: float = 2.0) -> bool:
+    """Debounce helper: Returns True if user actions are too rapid to prevent server overload."""
+    import time
+    now = time.time()
+    last = _user_last_action.get(chat_id, 0)
+    if now - last < min_interval_seconds:
+        return True
+    _user_last_action[chat_id] = now
+    return False
+
+def store_processed_articles(articles: list):
+    """
+    Stores processed, translated, categorized articles in RAM.
+    Guarantees instant responses for hundreds of concurrent users without re-scraping.
+    """
+    global _all_recent_articles, _articles_by_category
+    for art in articles:
+        if not art or not art.get('url'):
+            continue
+        existing_urls = {a['url'] for a in _all_recent_articles}
+        if art['url'] not in existing_urls:
+            _all_recent_articles.insert(0, art)
+            
+        cats = art.get('categories', [])
+        for cat in cats:
+            if cat not in _articles_by_category:
+                _articles_by_category[cat] = []
+            cat_urls = {a['url'] for a in _articles_by_category[cat]}
+            if art['url'] not in cat_urls:
+                _articles_by_category[cat].insert(0, art)
+                _articles_by_category[cat] = _articles_by_category[cat][:25]
+
+    _all_recent_articles = _all_recent_articles[:50]
+
+def get_articles_for_categories(user_cats: list, limit: int = 3) -> list:
+    """
+    Returns articles matching ANY of the user's chosen categories.
+    Guarantees STRICT category separation: only matching articles are returned.
+    """
+    if not user_cats:
+        return _all_recent_articles[:limit]
+        
+    matched = []
+    seen_urls = set()
+    for cat in user_cats:
+        for art in _articles_by_category.get(cat, []):
+            if art['url'] not in seen_urls:
+                seen_urls.add(art['url'])
+                matched.append(art)
+                if len(matched) >= limit:
+                    return matched
+    return matched
+
+def get_cached_recent_articles(limit: int = 10) -> list:
+    """Returns most recent processed articles from memory."""
+    return _all_recent_articles[:limit]
+
