@@ -187,23 +187,68 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Broadcast successfully sent to {sent} subscribers.")
 
 async def addurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to add a new base URL to scrape."""
+    """Admin command to add one or multiple base URLs to scrape in bulk."""
     chat_id = str(update.effective_chat.id)
     if chat_id != ADMIN_CHAT_ID:
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("⛔ Unauthorized.")
         return
         
-    if not context.args:
-        await update.message.reply_text("Usage: /addurl <https://example.com>")
+    raw_text = update.message.text or ""
+    import re
+    # Extract all valid URLs from the message (supports multiple links on separate lines or spaces)
+    found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+    
+    if not found_urls:
+        await update.message.reply_text(
+            "ℹ️ <b>របៀបប្រើ /addurl (Bulk URL Add):</b>\n\n"
+            "អ្នកអាចដាក់ Link មួយ ឬច្រើនក្នុងពេលតែមួយបាន (ចុះបន្ទាត់)៖\n"
+            "<code>/addurl https://news1.com\nhttps://news2.com\nhttps://news3.com</code>",
+            parse_mode='HTML'
+        )
         return
         
-    url = context.args[0]
-    if not url.startswith('http'):
-        await update.message.reply_text("URL must start with http:// or https://")
+    clean_urls = list(dict.fromkeys([u.strip().rstrip('/') for u in found_urls]))
+    added_urls = await storage.add_base_urls(clean_urls)
+    
+    if not added_urls:
+        await update.message.reply_text("⚠️ មិនអាចបញ្ចូល Link ទាំងនេះបានទេ។ សូមពិនិត្យមើល Link ម្តងទៀត។")
         return
         
-    await storage.add_base_url(url)
-    await update.message.reply_text(f"✅ Successfully added {url} to the database. The bot will now monitor it.")
+    url_list_str = "\n".join([f"  {idx}. {u}" for idx, u in enumerate(added_urls, 1)])
+    reply_text = (
+        f"✅ <b>ជោគជ័យ! បានបញ្ចូល ({len(added_urls)}) ប្រភពព័ត៌មានទៅក្នុងប្រព័ន្ធ:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{url_list_str}\n\n"
+        f"<i>📡 Bot នឹងចាប់ផ្តើមតាមដាន និងទាញយកព័ត៌មានពីគេហទំព័រទាំងនេះដោយស្វ័យប្រវត្តិ!</i>"
+    )
+    await update.message.reply_text(reply_text, parse_mode='HTML')
+
+async def removeurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to remove one or multiple base URLs."""
+    chat_id = str(update.effective_chat.id)
+    if chat_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+        
+    raw_text = update.message.text or ""
+    import re
+    found_urls = re.findall(r'https?://[^\s<>"]+', raw_text)
+    if not found_urls and context.args:
+        found_urls = context.args
+        
+    if not found_urls:
+        await update.message.reply_text("Usage: /removeurl <url1> <url2> ...")
+        return
+        
+    clean_urls = list(dict.fromkeys([u.strip().rstrip('/') for u in found_urls]))
+    removed = await storage.remove_base_urls(clean_urls)
+    
+    if not removed:
+        await update.message.reply_text("⚠️ មិនមាន Link ណាត្រូវដកចេញទេ។")
+        return
+        
+    reply = f"🗑 <b>បានដកចេញ ({len(removed)}) ប្រភពព័ត៌មាន:</b>\n" + "\n".join([f"  • {u}" for u in removed])
+    await update.message.reply_text(reply, parse_mode='HTML')
 
 async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetch and send the latest article immediately."""

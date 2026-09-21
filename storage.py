@@ -51,17 +51,40 @@ async def init_db():
 
 # --- BASE URLS ---
 async def add_base_url(url: str):
+    await add_base_urls([url])
+
+async def add_base_urls(urls: list) -> list:
+    """Adds multiple URLs to base_urls in bulk."""
+    valid_urls = list(dict.fromkeys([u.strip().rstrip('/') for u in urls if u and (u.startswith('http://') or u.startswith('https://'))]))
+    if not valid_urls:
+        return []
+        
     if USE_SUPABASE:
         try:
-            await asyncio.to_thread(lambda: _supabase.table('base_urls').upsert({'url': url}).execute())
+            records = [{'url': u} for u in valid_urls]
+            await asyncio.to_thread(lambda: _supabase.table('base_urls').upsert(records).execute())
+            return valid_urls
         except Exception as e:
-            logger.error(f"Supabase add_base_url error: {e}")
+            logger.error(f"Supabase add_base_urls bulk error: {e}")
+            added = []
+            for u in valid_urls:
+                try:
+                    await asyncio.to_thread(lambda: _supabase.table('base_urls').upsert({'url': u}).execute())
+                    added.append(u)
+                except Exception:
+                    pass
+            return added
     else:
         try:
-            await _conn.execute('INSERT OR IGNORE INTO base_urls (url) VALUES (?)', (url,))
+            if _conn is None:
+                await init_db()
+            for u in valid_urls:
+                await _conn.execute('INSERT OR IGNORE INTO base_urls (url) VALUES (?)', (u,))
             await _conn.commit()
+            return valid_urls
         except Exception as e:
-            logger.error(f"Failed to add base url {url}: {e}")
+            logger.error(f"Failed to bulk add base urls: {e}")
+            return []
 
 async def get_base_urls() -> list:
     if USE_SUPABASE:
@@ -73,6 +96,8 @@ async def get_base_urls() -> list:
             return []
     else:
         try:
+            if _conn is None:
+                await init_db()
             async with _conn.execute('SELECT url FROM base_urls') as cursor:
                 records = await cursor.fetchall()
                 return [r[0] for r in records]
@@ -81,17 +106,33 @@ async def get_base_urls() -> list:
             return []
 
 async def remove_base_url(url: str):
+    await remove_base_urls([url])
+
+async def remove_base_urls(urls: list) -> list:
+    """Removes multiple URLs from base_urls."""
+    cleaned = [u.strip().rstrip('/') for u in urls if u]
+    if not cleaned:
+        return []
     if USE_SUPABASE:
-        try:
-            await asyncio.to_thread(lambda: _supabase.table('base_urls').delete().eq('url', url).execute())
-        except Exception as e:
-            logger.error(f"Supabase remove_base_url error: {e}")
+        removed = []
+        for u in cleaned:
+            try:
+                await asyncio.to_thread(lambda: _supabase.table('base_urls').delete().eq('url', u).execute())
+                removed.append(u)
+            except Exception as e:
+                logger.error(f"Supabase remove_base_url error: {e}")
+        return removed
     else:
         try:
-            await _conn.execute('DELETE FROM base_urls WHERE url = ?', (url,))
+            if _conn is None:
+                await init_db()
+            for u in cleaned:
+                await _conn.execute('DELETE FROM base_urls WHERE url = ?', (u,))
             await _conn.commit()
+            return cleaned
         except Exception as e:
-            logger.error(f"Failed to remove base url {url}: {e}")
+            logger.error(f"Failed to remove base urls: {e}")
+            return []
 
 # --- IN-MEMORY CACHE FOR ULTRA-FAST RESPONSIVENESS ---
 _user_categories_cache = {}  # chat_id -> set of categories
