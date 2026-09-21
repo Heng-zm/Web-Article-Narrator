@@ -75,11 +75,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await storage.add_subscriber(chat_id)
     
     welcome_text = (
-        f"សួស្តី <b>{user_name}</b>! 👋 សូមស្វាគមន៍មកកាន់ប្រព័ន្ធព័ត៌មានទាន់ហេតុការណ៍!\n\n"
-        "Bot នេះមានភាពឆ្លាតវៃ (Smart AI) ក្នុងការតាមដាន និងបកប្រែព័ត៌មានថ្មីៗបំផុតពីគេហទំព័រល្បីៗ រៀងរាល់ ៥នាទីម្តង ភ្លាមៗពេលមានរឿងរ៉ាវកើតឡើង (Breaking News) វានឹងបញ្ជូនមកកាន់អ្នកដោយស្វ័យប្រវត្តិ។\n\n"
-        "👇 សូមជ្រើសរើសប្រភេទព័ត៌មានដែលអ្នកចង់តាមដាន៖"
+        f"🌟 <b>សួស្តី {user_name}!</b> 🌟\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🇰🇭 សូមស្វាគមន៍មកកាន់ <b>Web Article Narrator</b>\n"
+        f"ប្រព័ន្ធព័ត៌មានឆ្លាតវៃបំផុតសម្រាប់ប្រជាជនខ្មែរ!\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ <b>លក្ខណៈពិសេស (Features):</b>\n\n"
+        f"  📡 <b>ព័ត៌មានផ្ទាល់ (Real-Time News)</b>\n"
+        f"  ↳ ទទួលបានព័ត៌មានថ្មីរៀងរាល់ ៥ នាទី\n\n"
+        f"  🚨 <b>ព័ត៌មានបន្ទាន់ (Breaking News)</b>\n"
+        f"  ↳ ជូនដំណឹងភ្លាមៗពេលមានហេតុការណ៍សំខាន់\n\n"
+        f"  🧠 <b>បញ្ញាសិប្បនិម្មិត (Smart AI)</b>\n"
+        f"  ↳ ចាត់ថ្នាក់ & បកប្រែព័ត៌មានដោយស្វ័យប្រវត្តិ\n\n"
+        f"  🗂 <b>ជ្រើសរើសប្រភេទ (Custom Categories)</b>\n"
+        f"  ↳ ទទួលតែព័ត៌មានដែលអ្នកចង់អាន\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>ពាក្យបញ្ជា (Commands):</b>\n"
+        f"  /latest — ព័ត៌មានថ្មីបំផុតឥឡូវ\n"
+        f"  /categories — ជ្រើសរើសប្រភេទព័ត៌មាន\n"
+        f"  /stop — ឈប់ទទួលព័ត៌មាន\n\n"
+        f"👇 <b>ជំហានដំបូង:</b> សូមជ្រើសរើសប្រភេទព័ត៌មានដែលអ្នកចង់តាមដាន!"
     )
-    
+
     await update.message.reply_text(welcome_text, parse_mode='HTML')
     # Automatically show category selection menu so the bot "knows" the user
     await categories_menu(update, context)
