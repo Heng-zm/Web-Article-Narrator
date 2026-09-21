@@ -57,9 +57,14 @@ def translate_chunk(chunk: str, target_lang: str = 'km') -> str:
             
     return chunk
 
+# In-memory translation cache for maximum responsiveness
+_translation_cache = {}
+_MAX_CACHE_SIZE = 2000
+
 def translate_text(text: str, target_lang: str = 'km') -> str:
     """
     Translates text. Splits large texts into chunks to avoid limits.
+    Uses in-memory LRU-style cache for near-instant responses on repeated text.
     Skips if text is already mostly Khmer.
     """
     if not text:
@@ -68,19 +73,32 @@ def translate_text(text: str, target_lang: str = 'km') -> str:
     if is_khmer(text):
         return text
         
+    cache_key = f"{target_lang}:{text.strip()}"
+    if cache_key in _translation_cache:
+        return _translation_cache[cache_key]
+        
     try:
         # Splitting text into chunks of ~4000 chars (Google gtx supports up to 5000)
-        # This massively reduces the number of network requests and prevents 429 errors!
         chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
         translated_chunks = []
         
-        for chunk in chunks:
+        for idx, chunk in enumerate(chunks):
             if chunk.strip():
                 t_chunk = translate_chunk(chunk, target_lang)
                 translated_chunks.append(t_chunk)
-                time.sleep(2.0)  # Heavy safe delay between chunks
+                if idx < len(chunks) - 1:
+                    time.sleep(1.0)  # Safe delay only between subsequent chunks
                 
-        return "".join(translated_chunks)
+        result = "".join(translated_chunks)
+        
+        # Store in cache
+        if len(_translation_cache) >= _MAX_CACHE_SIZE:
+            # Drop oldest 200 entries
+            for k in list(_translation_cache.keys())[:200]:
+                _translation_cache.pop(k, None)
+        _translation_cache[cache_key] = result
+        
+        return result
         
     except Exception as e:
         logger.error(f"Translation error: {e}")

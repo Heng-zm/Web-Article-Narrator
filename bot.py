@@ -8,6 +8,7 @@ import logging
 import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, InlineQueryResultArticle, InputTextMessageContent
+from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, InlineQueryHandler
 from urllib.parse import urlparse
 from datetime import datetime
@@ -17,7 +18,7 @@ import storage
 from extractor import get_new_articles
 from translator import translate_text
 from summarizer import extractive_summary
-from categorizer import CATEGORIES, categorize_article
+from categorizer import CATEGORIES, categorize_article, analyze_article_metadata
 
 # Setup logging
 logging.basicConfig(
@@ -55,6 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
     
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     await storage.add_subscriber(chat_id)
     
     welcome_text = (
@@ -146,27 +148,30 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No base URLs configured. Use /addurl first.")
         return
         
-    status_message = await update.message.reply_text("🔎 Fetching the latest news from all sources...")
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    status_message = await update.message.reply_text("🔎 កំពុងស្វែងរកព័ត៌មានចុងក្រោយពីគ្រប់ប្រភព...")
     
-    # Try all URLs until we find articles
+    # 1. Concurrently scrape all base URLs for maximum responsiveness
+    tasks = [get_new_articles(base) for base in urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
     all_articles = []
-    for base in urls:
-        arts = await get_new_articles(base)
-        all_articles.extend(arts)
-        
+    for r in results:
+        if isinstance(r, list):
+            all_articles.extend(r)
+            
     if not all_articles:
-        await status_message.edit_text("No articles found right now.")
+        await status_message.edit_text("មិនទាន់មានព័ត៌មានថ្មីនៅពេលនេះទេ។")
         return
         
-    # Just grab the very first one found across all sources
+    # Grab the freshest article
     article = all_articles[0]
     url = article['url']
     image_url = article.get('image_url')
     title = article.get('title', 'News Article')
     
-    short_summary = await asyncio.to_thread(extractive_summary, article['text'])
-    
-    # Translate
+    # 2. Summarize & Translate concurrently
+    short_summary = await asyncio.to_thread(extractive_summary, article.get('text', ''))
     km_title, km_text = await asyncio.gather(
         asyncio.to_thread(translate_text, title),
         asyncio.to_thread(translate_text, short_summary)
@@ -175,20 +180,19 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     domain = urlparse(url).netloc.replace('www.', '')
     date_str = datetime.now().strftime("%d/%m/%Y")
     
-    # Generate Hashtags based on title and summary
+    # 3. Smart NLP Metadata Analysis
     url_slug = url.strip('/').split('/')[-1].replace('-', ' ')
-    article_cats = categorize_article(km_text, url_slug)
-    if article_cats:
-        hashtags = " ".join([f"#{cat.replace(' ', '_')}" for cat in article_cats])
-    else:
-        hashtags = "#ព័ត៌មានទូទៅ"
-        
-    footer = f"🔒 <b>ប្រភព:</b> {domain}\n📅 {date_str}\n\n{hashtags}"
-    header = f"📰 <b>{km_title}</b>\n\n"
+    analysis = analyze_article_metadata(km_title=km_title, km_text=km_text, en_title=url_slug)
     
-    # Format the translated summary into clean bullet points
+    footer = f"🔗 <b>ប្រភព:</b> {domain}\n📅 {date_str}\n\n{analysis['hashtags']}"
+    
+    if analysis['is_hot']:
+        header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{km_title}</b>\n\n"
+    else:
+        header = f"📰 <b>{km_title}</b>\n\n"
+    
+    # 4. Format clean bullet points
     raw_km_text = km_text
-    # Split by the strict delimiter
     lines = [line.strip() for line in raw_km_text.split('|||') if line.strip()]
     
     clean_km_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
@@ -197,7 +201,6 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for line in lines:
         line = line.lstrip('•').lstrip('-').lstrip('*').lstrip('🔹').strip()
-        
         if current_len + len(line) > max_text_len:
             remaining = max_text_len - current_len
             if remaining > 15:
@@ -212,13 +215,15 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🔗 អានដើម (Read Original)", url=url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # 5. Fetch Image with upload action indicator
     image_bytes = None
     if image_url:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         from extractor import get_scraper
         try:
             def fetch_img():
                 with get_scraper() as scraper:
-                    res = scraper.get(image_url, timeout=10)
+                    res = scraper.get(image_url, timeout=8)
                     if res.status_code == 200:
                         return res.content
                     return None
@@ -307,18 +312,20 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Failed to edit message: {e}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button clicks from the inline keyboard."""
+    """Handles button clicks from the inline keyboard with instant haptic/toast feedback."""
     query = update.callback_query
-    await query.answer()
-    
     data = query.data
     chat_id = query.message.chat_id
     
     if data.startswith("toggle_"):
         cat = data.split("toggle_")[1]
-        await storage.toggle_user_category(chat_id, cat)
-        # Refresh menu
+        added = await storage.toggle_user_category(chat_id, cat)
+        toast = f"✅ បានជ្រើសរើស៖ {cat}" if added else f"❌ បានដកចេញ៖ {cat}"
+        await query.answer(toast)
+        # Refresh menu instantly from memory cache
         await categories_menu(update, context)
+    else:
+        await query.answer()
 
 async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles inline queries for searching news via DuckDuckGo."""

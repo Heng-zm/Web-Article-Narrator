@@ -93,8 +93,16 @@ async def remove_base_url(url: str):
         except Exception as e:
             logger.error(f"Failed to remove base url {url}: {e}")
 
+# --- IN-MEMORY CACHE FOR ULTRA-FAST RESPONSIVENESS ---
+_user_categories_cache = {}  # chat_id -> set of categories
+_subscribers_cache = None    # set of subscriber chat_ids
+
 # --- SUBSCRIBERS ---
 async def add_subscriber(chat_id: int):
+    global _subscribers_cache
+    if _subscribers_cache is not None:
+        _subscribers_cache.add(chat_id)
+        
     if USE_SUPABASE:
         try:
             await asyncio.to_thread(lambda: _supabase.table('subscribers').upsert({'chat_id': chat_id}).execute())
@@ -108,6 +116,11 @@ async def add_subscriber(chat_id: int):
             logger.error(f"Failed to add subscriber {chat_id}: {e}")
 
 async def remove_subscriber(chat_id: int):
+    global _subscribers_cache
+    if _subscribers_cache is not None:
+        _subscribers_cache.discard(chat_id)
+    _user_categories_cache.pop(chat_id, None)
+    
     if USE_SUPABASE:
         try:
             await asyncio.to_thread(lambda: _supabase.table('subscribers').delete().eq('chat_id', chat_id).execute())
@@ -124,10 +137,15 @@ async def remove_subscriber(chat_id: int):
             logger.error(f"Failed to remove subscriber {chat_id}: {e}")
 
 async def get_subscribers() -> list:
+    global _subscribers_cache
+    if _subscribers_cache is not None:
+        return list(_subscribers_cache)
+
     if USE_SUPABASE:
         try:
             res = await asyncio.to_thread(lambda: _supabase.table('subscribers').select('chat_id').execute())
-            return [r['chat_id'] for r in res.data]
+            _subscribers_cache = set(r['chat_id'] for r in res.data)
+            return list(_subscribers_cache)
         except Exception as e:
             logger.error(f"Supabase get_subscribers error: {e}")
             return []
@@ -135,7 +153,8 @@ async def get_subscribers() -> list:
         try:
             async with _conn.execute('SELECT chat_id FROM subscribers') as cursor:
                 records = await cursor.fetchall()
-                return [r[0] for r in records]
+                _subscribers_cache = set(r[0] for r in records)
+                return list(_subscribers_cache)
         except Exception as e:
             logger.error(f"Failed to get subscribers: {e}")
             return []
@@ -185,19 +204,26 @@ async def get_sent_articles_count() -> int:
         except Exception as e:
             return 0
 
-# --- USER CATEGORIES ---
+# --- USER CATEGORIES (CACHED) ---
 async def get_user_categories(chat_id: int) -> list:
+    if chat_id in _user_categories_cache:
+        return list(_user_categories_cache[chat_id])
+
     if USE_SUPABASE:
         try:
             res = await asyncio.to_thread(lambda: _supabase.table('user_categories').select('category').eq('chat_id', chat_id).execute())
-            return [r['category'] for r in res.data]
+            cats = set(r['category'] for r in res.data)
+            _user_categories_cache[chat_id] = cats
+            return list(cats)
         except Exception as e:
             return []
     else:
         try:
             async with _conn.execute('SELECT category FROM user_categories WHERE chat_id = ?', (chat_id,)) as cursor:
                 records = await cursor.fetchall()
-                return [r[0] for r in records]
+                cats = set(r[0] for r in records)
+                _user_categories_cache[chat_id] = cats
+                return list(cats)
         except Exception as e:
             return []
 
@@ -211,9 +237,12 @@ async def get_all_user_categories() -> dict:
                 if cid not in mapping:
                     mapping[cid] = []
                 mapping[cid].append(row['category'])
+                
+            for cid, cats in mapping.items():
+                _user_categories_cache[cid] = set(cats)
             return mapping
         except Exception as e:
-            return {}
+            return {cid: list(cats) for cid, cats in _user_categories_cache.items()}
     else:
         try:
             async with _conn.execute('SELECT chat_id, category FROM user_categories') as cursor:
@@ -223,36 +252,44 @@ async def get_all_user_categories() -> dict:
                     if chat_id not in mapping:
                         mapping[chat_id] = []
                     mapping[chat_id].append(category)
+                    
+                for cid, cats in mapping.items():
+                    _user_categories_cache[cid] = set(cats)
                 return mapping
         except Exception as e:
-            return {}
+            return {cid: list(cats) for cid, cats in _user_categories_cache.items()}
 
 async def toggle_user_category(chat_id: int, category: str) -> bool:
+    # 1. Instant Cache Update for zero-latency response
+    current = set(await get_user_categories(chat_id))
+    if category in current:
+        current.remove(category)
+        added = False
+    else:
+        current.add(category)
+        added = True
+    _user_categories_cache[chat_id] = current
+
+    # 2. Asynchronous DB Persistence in background
     if USE_SUPABASE:
         try:
-            current = await get_user_categories(chat_id)
-            if category in current:
+            if not added:
                 await asyncio.to_thread(lambda: _supabase.table('user_categories').delete().eq('chat_id', chat_id).eq('category', category).execute())
-                return False
             else:
                 await asyncio.to_thread(lambda: _supabase.table('user_categories').upsert({'chat_id': chat_id, 'category': category}).execute())
-                return True
         except Exception as e:
             logger.error(f"Supabase toggle_user_category error: {e}")
-            return False
     else:
         try:
-            current = await get_user_categories(chat_id)
-            if category in current:
+            if not added:
                 await _conn.execute('DELETE FROM user_categories WHERE chat_id = ? AND category = ?', (chat_id, category))
-                added = False
             else:
                 await _conn.execute('INSERT INTO user_categories (chat_id, category) VALUES (?, ?)', (chat_id, category))
-                added = True
             await _conn.commit()
-            return added
         except Exception as e:
-            return False
+            logger.error(f"SQLite toggle_user_category error: {e}")
+            
+    return added
 
 # --- STATS ---
 async def get_stats() -> dict:

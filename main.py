@@ -126,15 +126,20 @@ async def process_articles(bot: Bot):
             
         # === STAGE 4: BROADCAST ===
         logger.info("Pipeline Stage 4: Broadcasting to users...")
-        from categorizer import categorize_article
+        from categorizer import categorize_article, analyze_article_metadata
         
         # Massively optimize database performance by fetching all preferences in a single O(1) query
         subscribers = await storage.get_subscribers()
         all_user_prefs = await storage.get_all_user_categories()
         
         for article in all_new_articles:
-            # Categorize the article using the fast NLP keyword matcher
-            article_cats = categorize_article(article.get('km_full_text', ''), article.get('en_title', ''))
+            # Deep Multi-Factor NLP Analysis (weighted scoring, urgency, categories)
+            analysis = analyze_article_metadata(
+                km_title=article.get('km_title', ''),
+                km_text=article.get('km_text', ''),
+                en_title=article.get('en_title', '')
+            )
+            article_cats = analysis['categories']
             
             # Filter subscribers based on their category preferences in RAM instantly
             target_subscribers = []
@@ -165,19 +170,10 @@ async def process_articles(bot: Bot):
             else:
                 status_badge = "⚠️ មិនមានប្រភពអន្តរជាតិ (Unverified)"
             
-            # Generate Hashtags
-            if article_cats:
-                hashtags = " ".join([f"#{cat.replace(' ', '_')}" for cat in article_cats])
-            else:
-                hashtags = "#ព័ត៌មានទូទៅ"
-                
+            hashtags = analysis['hashtags']
             footer = f"🔗 <b>ប្រភព:</b> {domain}\n🛡️ <b>បញ្ជាក់ប្រភព:</b> {status_badge}\n📅 {date_str}\n\n{hashtags}"
             
-            # Smart Hot News Detection
-            hot_keywords = ['breaking', 'urgent', 'alert', 'exclusive', 'emergency', 'attack', 'blast', 'dead', 'killed', 'បន្ទាន់', 'ក្តៅគគុក', 'ទាន់ហេតុការណ៍', 'រន្ធត់', 'ផ្ទុះ', 'ស្លាប់']
-            is_hot_news = any(kw in str(article.get('en_title', '')).lower() or kw in str(article.get('km_title', '')).lower() for kw in hot_keywords)
-            
-            if is_hot_news:
+            if analysis['is_hot']:
                 header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING NEWS)</b> 🔥🚨\n\n📰 <b>{article['km_title']}</b>\n\n"
             else:
                 header = f"📰 <b>{article['km_title']}</b>\n\n"
