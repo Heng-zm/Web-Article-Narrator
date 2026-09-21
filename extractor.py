@@ -1,6 +1,6 @@
 import trafilatura
 from readability import Document
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import hashlib
 import logging
 from bs4 import BeautifulSoup
