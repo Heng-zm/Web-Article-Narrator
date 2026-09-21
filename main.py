@@ -342,11 +342,25 @@ async def main():
 
     logger.info("Starting Webhook, Scheduler, and Telegram Bot...")
     
-    # 1. Build Telegram Application and attach handlers
+    # 1. Start the aiohttp web server IMMEDIATELY so Render detects the open port
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/trigger', webhook_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"Webhook server listening on http://0.0.0.0:{port}/trigger")
+
+    # 2. Build Telegram Application and attach handlers
     import bot as bot_module
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, InlineQueryHandler
     
     application = Application.builder().token(BOT_TOKEN).build()
+    app['bot'] = application.bot # Attach bot to web app after building
     
     application.add_handler(CommandHandler("start", bot_module.start))
     application.add_handler(CommandHandler("stop", bot_module.stop))
@@ -372,23 +386,10 @@ async def main():
     await application.updater.start_polling()
     logger.info("Telegram Bot Polling started!")
     
-    # 2. Start the background polling loop
+    # 3. Start the heavy background polling loop last
     bg_task = asyncio.create_task(background_scheduler(application.bot))
     active_tasks.add(bg_task)
     
-    # 3. Start the aiohttp web server
-    app = web.Application()
-    app['bot'] = application.bot
-    app.router.add_get('/', health_check)
-    app.router.add_get('/trigger', webhook_handler)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    logger.info(f"Webhook server listening on http://0.0.0.0:{port}/trigger")
     logger.info("System fully operational!")
     
     # Keep the main process alive
