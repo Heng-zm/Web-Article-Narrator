@@ -357,7 +357,7 @@ async def bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='HTML')
 
 async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the interactive category selection menu."""
+    """Shows the interactive category selection menu with a Confirm button."""
     if update.message:
         chat_id = update.message.chat_id
     else:
@@ -367,13 +367,33 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     for cat in CATEGORIES:
-        # Show ✅ if selected, ❌ if not
-        icon = "✅" if cat in user_cats else "❌"
-        button_text = f"{icon} {cat}"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"toggle_{cat}")])
+        icon = "✅" if cat in user_cats else "☑️"
+        keyboard.append([InlineKeyboardButton(f"{icon} {cat}", callback_data=f"toggle_{cat}")])
+
+    # Confirm button always at the bottom
+    if user_cats:
+        keyboard.append([InlineKeyboardButton("🚀 បញ្ជាក់ & មើលព័ត៌មាន (Confirm & Read News)", callback_data="confirm_categories")])
+    else:
+        keyboard.append([InlineKeyboardButton("👆 សូមជ្រើសរើសប្រភេទមួយ...", callback_data="noop")])
         
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "🗞️ <b>សូមជ្រើសរើសប្រភេទព័ត៌មានដែលអ្នកចង់អាន៖</b>\n(ជ្រើសរើសមួយឬច្រើន / Select your preferred categories)"
+    
+    selected_count = len(user_cats)
+    if selected_count > 0:
+        selected_labels = ", ".join(user_cats)
+        text = (
+            f"🗞️ <b>ជ្រើសរើសប្រភេទព័ត៌មាន (Categories)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>បានជ្រើស ({selected_count}):</b> {selected_labels}\n\n"
+            f"ចុច <b>🚀 បញ្ជាក់</b> ដើម្បីទទួលព័ត៌មានភ្លាមៗ!"
+        )
+    else:
+        text = (
+            f"🗞️ <b>ជ្រើសរើសប្រភេទព័ត៌មាន (Categories)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👆 សូមជ្រើសរើសប្រភេទព័ត៌មានដែលអ្នកចង់អាន\n"
+            f"(អ្នកអាចជ្រើសច្រើនប្រភេទ)"
+        )
     
     if update.message:
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
@@ -384,21 +404,155 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "Message is not modified" not in str(e):
                 logger.error(f"Failed to edit message: {e}")
 
+async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
+    """Fetches and sends articles matching the user's chosen categories immediately."""
+    from extractor import get_new_articles, get_scraper
+    from summarizer import extractive_summary
+    from translator import translate_text
+    from categorizer import analyze_article_metadata
+    from telegraph_engine import get_telegraph_url
+
+    urls = await storage.get_base_urls()
+    if BASE_URL and BASE_URL not in urls:
+        urls.append(BASE_URL)
+
+    if not urls:
+        await bot.send_message(chat_id=chat_id, text="⚠️ Bot មិនទាន់មានប្រភពព័ត៌មានទេ។ សូមផ្ញើ /addurl ជាមុន។")
+        return
+
+    await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    # Concurrently scrape all sources
+    tasks = [get_new_articles(base) for base in urls[:4]]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_articles = []
+    for r in results:
+        if isinstance(r, list):
+            all_articles.extend(r)
+
+    if not all_articles:
+        await bot.send_message(chat_id=chat_id,
+            text="📭 <b>មិនទាន់មានព័ត៌មានថ្មីនៅពេលនេះ</b>\n\nBot នឹងបញ្ជូនព័ត៌មានដោយស្វ័យប្រវត្តិពេលមានរឿងថ្មី! 🔔",
+            parse_mode='HTML')
+        return
+
+    # Filter articles by user's chosen categories
+    matched = []
+    for art in all_articles:
+        url_slug = art['url'].strip('/').split('/')[-1].replace('-', ' ')
+        analysis = analyze_article_metadata(
+            km_text=art.get('text', ''),
+            en_title=art.get('title', url_slug)
+        )
+        art_cats = analysis['categories']
+        # Match if any article category overlaps with user's chosen categories
+        if not art_cats or any(c in user_cats for c in art_cats):
+            art['_analysis'] = analysis
+            matched.append(art)
+
+    if not matched:
+        await bot.send_message(chat_id=chat_id,
+            text=f"🔍 <b>មិនទាន់រកឃើញព័ត៌មានទាក់ទងនឹង:</b> {', '.join(user_cats)}\n\nBot នឹងបញ្ជូនភ្លាមៗពេលមានព័ត៌មានថ្មី! 🔔",
+            parse_mode='HTML')
+        return
+
+    # Take top 3 matching articles
+    for art in matched[:3]:
+        try:
+            analysis = art.get('_analysis', {})
+            title = art.get('title', 'ព័ត៌មានថ្មី')
+            text_body = art.get('text', '')
+
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+            short_summary = await asyncio.to_thread(extractive_summary, text_body)
+            km_title, km_text = await asyncio.gather(
+                asyncio.to_thread(translate_text, title),
+                asyncio.to_thread(translate_text, short_summary)
+            )
+
+            url = art['url']
+            domain = urlparse(url).netloc.replace('www.', '')
+            date_str = datetime.now().strftime("%d/%m/%Y")
+            hashtags = analysis.get('hashtags', '#ព័ត៌មានទូទៅ')
+
+            if analysis.get('is_hot'):
+                header = f"🚨🔥 <b>ព័ត៌មានក្តៅគគុក (BREAKING)</b> 🔥🚨\n\n📰 <b>{km_title}</b>\n\n"
+            else:
+                header = f"📰 <b>{km_title}</b>\n\n"
+
+            lines = [l.strip() for l in km_text.split('|||') if l.strip()]
+            body_text = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
+            for line in lines[:4]:
+                line = line.lstrip('•-*🔹').strip()
+                if line:
+                    body_text += f"• {line}\n"
+
+            footer = f"\n🔗 <b>ប្រភព:</b> {domain} | 📅 {date_str}\n{hashtags}"
+            summary = f"{header}{body_text}{footer}"[:1020]
+
+            keyboard = [[InlineKeyboardButton("🔗 អានបន្ត (Read More)", url=url)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            image_url = art.get('image_url')
+            image_bytes = None
+            if image_url:
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                try:
+                    def fetch():
+                        with get_scraper() as s:
+                            r = s.get(image_url, timeout=8)
+                            return r.content if r.status_code == 200 else None
+                    image_bytes = await asyncio.to_thread(fetch)
+                except Exception:
+                    pass
+
+            if image_bytes:
+                await bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=summary, parse_mode='HTML', reply_markup=reply_markup)
+            else:
+                await bot.send_message(chat_id=chat_id, text=summary, parse_mode='HTML', reply_markup=reply_markup)
+
+            await asyncio.sleep(1.0)
+        except Exception as e:
+            logger.error(f"Failed to send article to {chat_id}: {e}")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button clicks from the inline keyboard with instant haptic/toast feedback."""
+    """Handles all inline button clicks."""
     query = update.callback_query
     data = query.data
     chat_id = query.message.chat_id
-    
+
+    if data == "noop":
+        await query.answer("👆 សូមជ្រើសរើសប្រភេទព័ត៌មានជាមុនសិន!")
+        return
+
+    if data == "confirm_categories":
+        user_cats = await storage.get_user_categories(chat_id)
+        if not user_cats:
+            await query.answer("⚠️ សូមជ្រើសរើសប្រភេទព័ត៌មានជាមុន!")
+            return
+
+        await query.answer("🚀 កំពុងរកព័ត៌មានសម្រាប់អ្នក...")
+        try:
+            await query.edit_message_text(
+                f"🔍 <b>កំពុងស្វែងរកព័ត៌មានដែលទាក់ទងនឹង:</b>\n{', '.join(user_cats)}\n\n⏳ សូមរង់ចាំបន្តិច...",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+        await send_articles_for_categories(context.bot, chat_id, user_cats)
+        return
+
     if data.startswith("toggle_"):
         cat = data.split("toggle_")[1]
         added = await storage.toggle_user_category(chat_id, cat)
-        toast = f"✅ បានជ្រើសរើស៖ {cat}" if added else f"❌ បានដកចេញ៖ {cat}"
+        toast = f"✅ {cat}" if added else f"☑️ បានដក {cat}"
         await query.answer(toast)
-        # Refresh menu instantly from memory cache
         await categories_menu(update, context)
-    else:
-        await query.answer()
+        return
+
+    await query.answer()
 
 async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles inline queries for searching news via DuckDuckGo."""
