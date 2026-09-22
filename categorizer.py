@@ -1,4 +1,5 @@
 import re
+import urllib.parse
 
 CATEGORIES = [
     "បច្ចេកវិទ្យា",     # Technology
@@ -24,14 +25,15 @@ KEYWORDS = {
         "ឧក្រិដ្ឋកម្ម", "ប៉ូលិស", "ឃាតកម្ម", "គ្រោះធម្មជាតិ", "ក្មេងទំនើង", "ចរាចរណ៍", "មន្ទីរពេទ្យ"
     ],
     "នយោបាយ": [
-        "politic", "government", "election", "minister", "parliament", "senate", "law", 
-        "diplomac", "president", "policy", "sanction", "treaty", "ambassador",
+        "politics", "political", "politician", "government", "election", "minister", 
+        "parliament", "senate", "law", "diplomacy", "diplomat", "diplomatic", "president", 
+        "policy", "sanction", "treaty", "ambassador",
         "នយោបាយ", "រដ្ឋាភិបាល", "ការបោះឆ្នោត", "រដ្ឋមន្ត្រី", "គណបក្ស", "សភា", "ព្រឹទ្ធសភា", 
         "នាយករដ្ឋមន្ត្រី", "ច្បាប់", "សិទ្ធិមនុស្ស", "ការទូត", "ក្រសួង", "នយោបាយការបរទេស"
     ],
     "សង្គ្រាម": [
-        "war", "military", "army", "weapon", "missile", "russia", "ukraine", "gaza", 
-        "israel", "conflict", "terror", "troops", "attack", "invasion", "defense",
+        "war", "military", "army", "armies", "weapon", "missile", "russia", "ukraine", "gaza", 
+        "israel", "conflict", "terror", "terrorist", "terrorism", "troops", "attack", "invasion", "defense",
         "សង្គ្រាម", "កងទ័ព", "អាវុធ", "មីស៊ីល", "រុស្ស៊ី", "អ៊ុយក្រែន", "អ៊ីស្រាអែល", 
         "ហាម៉ាស់", "បាញ់ប្រហារ", "យោធា", "ភេរវកម្ម", "ជម្លោះ", "ការវាយប្រហារ", "ទាហាន"
     ],
@@ -39,13 +41,14 @@ KEYWORDS = {
         "cambodia", "phnom penh", "siem reap", "sihanoukville", "national", "khmer", 
         "battambang", "kampot", "kandal", "angkor",
         "ក្នុងស្រុក", "កម្ពុជា", "ភ្នំពេញ", "សៀមរាប", "ព្រះសីហនុ", "ក្រសួង", "សម្តេច", 
-        "ជាតិ", "អាជ្ញាធរ", "ខេត្ត", "រាជធានី", "បាត់ដំបង", "កំពត", "កណ្តាល"
+        "ជាតិ", "អាជ្ញាធរ", "ខេត្ត", "រាជធានី", "បាត់ដំបង", "កំពត", "កណ្តាល", 
+        "ព័ត៌មានក្នុងស្រុក", "ពត៌មានក្នុងស្រុក"
     ],
     "អន្តរជាតិ": [
-        "international", "global", "world", "us", "china", "europe", "asean", "foreign", 
+        "international", "global", "world", "usa", "united states", "china", "europe", "asean", "foreign", 
         "united nations", "beijing", "washington", "nato",
         "អន្តរជាតិ", "ពិភពលោក", "អាមេរិក", "ចិន", "អឺរ៉ុប", "អាស៊ាន", "បរទេស", 
-        "អង្គការសហប្រជាជាតិ", "សហភាពអឺរ៉ុប", "មហាអំណាច"
+        "អង្គការសហប្រជាជាតិ", "អ.ស.ប", "សហភាពអឺរ៉ុប", "មហាអំណាច"
     ],
     "កីឡា": [
         "sport", "football", "soccer", "basketball", "tennis", "volleyball", "badminton",
@@ -54,12 +57,10 @@ KEYWORDS = {
         "score", "goal", "player", "coach", "team", "win", "defeat", "final", "semifinal",
         "boxing", "swimming", "cycling", "marathon", "athletics", "gym", "wrestling",
         "កីឡា", "បាល់ទាត់", "បាល់បោះ", "វាយកូនបាល់", "ជើងឯក", "ស៊ីហ្គេម", "អូឡាំពិក",
-        "មេដាយ", "មាស", "ប្រាក់", "សំរឹទ្ធ", "ពានរង្វាន់", "ការប្រកួត", "គ្រូបង្ហាត់",
-        "អត្តពលិក", "ក្រុម", "ចំណាត់ថ្នាក់", "ជ័យជំនះ", "ការចាញ់", "គោល", "ទន្លប",
-        "ពហុកីឡាដ្ឋាន", "ប្រកួតជម្រុះ", "វគ្គផ្តាច់ព្រ័ត្រ", "ហ្វ៊ីហ្វា", "អ.ស.ប"
+        "មេដាយ", "ពានរង្វាន់", "ការប្រកួត", "គ្រូបង្ហាត់", "អត្តពលិក", "ក្រុម", "ចំណាត់ថ្នាក់", 
+        "ជ័យជំនះ", "ការចាញ់", "គោល", "ពហុកីឡាដ្ឋាន", "ប្រកួតជម្រុះ", "វគ្គផ្តាច់ព្រ័ត្រ", "ហ្វ៊ីហ្វា"
     ]
 }
-
 
 HOT_KEYWORDS = [
     'breaking', 'urgent', 'alert', 'exclusive', 'emergency', 'attack', 'blast', 
@@ -75,28 +76,33 @@ def analyze_article_metadata(km_title: str = "", km_text: str = "", en_title: st
     - Urgency level
     - Dynamic clean hashtags
     """
-    title_combined = f"{km_title} {en_title}".lower()
-    body_combined = km_text.lower()
-    full_text = f"{title_combined} {body_combined}"
+    # Safe string sanitation (guards against NoneType)
+    km_title_clean = (km_title or "").strip()
+    km_text_clean = (km_text or "").strip()
+    en_title_clean = (en_title or "").strip()
+
+    title_combined = f"{km_title_clean} {en_title_clean}".lower().strip()
+    body_combined = km_text_clean.lower()
+    full_text = f"{title_combined} {body_combined}".strip()
     
     # 1. Weighted Category Scoring
     category_scores = {}
     for category, keywords in KEYWORDS.items():
         score = 0.0
         for kw in keywords:
-            kw_lower = kw.lower()
-            # English word boundary match
+            kw_lower = kw.lower().strip()
+            # English word boundary match (supports optional plural -s/-es)
             if re.match(r'^[a-z0-9\s]+$', kw_lower):
-                pattern = rf"\b{re.escape(kw_lower)}\b"
-                if re.search(pattern, title_combined):
+                pattern = rf"\b{re.escape(kw_lower)}(?:s|es)?\b"
+                if title_combined and re.search(pattern, title_combined):
                     score += 3.0  # Title match carries 3x weight
-                if re.search(pattern, body_combined):
+                if body_combined and re.search(pattern, body_combined):
                     score += 1.0
             else:
                 # Khmer continuous text match
-                if kw_lower in title_combined:
+                if title_combined and kw_lower in title_combined:
                     score += 3.0
-                if kw_lower in body_combined:
+                if body_combined and kw_lower in body_combined:
                     score += 1.0
         if score > 0:
             category_scores[category] = score
@@ -104,15 +110,21 @@ def analyze_article_metadata(km_title: str = "", km_text: str = "", en_title: st
     # Select categories that have a meaningful score (sorted by highest relevance)
     sorted_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
     # Take top categories with score >= 2.0 (or top 1 if any score)
-    matched_categories = [cat for cat, score in sorted_categories if score >= 2.0]
+    matched_categories = [cat for cat, s in sorted_categories if s >= 2.0]
     if not matched_categories and sorted_categories:
         matched_categories = [sorted_categories[0][0]]
         
     # 2. Hot News / Urgency Analysis
     hot_hits = 0
     for kw in HOT_KEYWORDS:
-        if kw in full_text:
-            hot_hits += 1
+        kw_lower = kw.lower().strip()
+        if re.match(r'^[a-z0-9\s]+$', kw_lower):
+            # Avoid substring collisions like 'dead' in 'deadline'
+            if re.search(rf"\b{re.escape(kw_lower)}\b", full_text):
+                hot_hits += 1
+        else:
+            if kw_lower in full_text:
+                hot_hits += 1
             
     is_hot = hot_hits >= 1
     if hot_hits >= 2:
@@ -136,12 +148,31 @@ def analyze_article_metadata(km_title: str = "", km_text: str = "", en_title: st
         "category_scores": category_scores
     }
 
-def categorize_article(km_text: str, en_title: str) -> list:
-    """Backwards-compatible wrapper returning list of categories."""
-    result = analyze_article_metadata(km_text=km_text, en_title=en_title)
-    return result["categories"]
+def categorize_article(*args, **kwargs) -> list:
+    """
+    Backwards-compatible wrapper returning list of categories.
+    Supports:
+      - categorize_article(km_title, km_text, en_title)
+      - categorize_article(km_text, en_title) [Legacy]
+      - categorize_article(km_title="...", km_text="...", en_title="...")
+    """
+    km_title = kwargs.get("km_title", "")
+    km_text = kwargs.get("km_text", "")
+    en_title = kwargs.get("en_title", "")
 
-import urllib.parse
+    if len(args) == 1:
+        km_text = km_text or args[0]
+    elif len(args) == 2:
+        # Legacy positional call: (km_text, en_title)
+        km_text = km_text or args[0]
+        en_title = en_title or args[1]
+    elif len(args) >= 3:
+        km_title = km_title or args[0]
+        km_text = km_text or args[1]
+        en_title = en_title or args[2]
+
+    result = analyze_article_metadata(km_title=km_title, km_text=km_text, en_title=en_title)
+    return result["categories"]
 
 CONFLICT_LOCATIONS = {
     # Ukraine / Russia Conflict
@@ -181,7 +212,7 @@ CONFLICT_LOCATIONS = {
     # Other Conflict Hotspots
     "Taiwan Strait": ["taiwan", "តៃវ៉ាន់", "ច្រកសមុទ្រតៃវ៉ាន់"],
     "South China Sea": ["south china sea", "សមុទ្រចិនខាងត្បូង"],
-    "Sudan": ["sudan", "khartum", "ស៊ូដង់"],
+    "Sudan": ["sudan", "khartoum", "khartum", "ស៊ូដង់"],
     "Myanmar": ["myanmar", "burma", "មីយ៉ាន់ម៉ា"]
 }
 
@@ -197,40 +228,43 @@ def get_conflict_map_info(text: str = "", url: str = "") -> dict:
     if "liveuamap.com" in url_lower:
         return {
             "label": "🗺️ ពិនិត្យលើផែនទីសង្គ្រាម (Liveuamap)",
-            "url": "https://liveuamap.com"
+            "url": url if url.startswith("http") else "https://liveuamap.com"
         }
     if "deepstatemap.live" in url_lower:
         return {
             "label": "🗺️ ពិនិត្យលើផែនទីយុទ្ធសាស្ត្រ (DeepState)",
-            "url": "https://deepstatemap.live"
+            "url": url if url.startswith("http") else "https://deepstatemap.live"
         }
         
     # 2. Check for specific conflict city/hotspot
     for location, keywords in CONFLICT_LOCATIONS.items():
         for kw in keywords:
-            kw_clean = kw.lower()
+            kw_clean = kw.lower().strip()
+            matched = False
             if re.match(r'^[a-z0-9\s]+$', kw_clean):
                 if re.search(rf"\b{re.escape(kw_clean)}\b", text_lower):
-                    encoded = urllib.parse.quote(f"{location} war map")
-                    return {
-                        "label": f"🗺️ ពិនិត្យទីតាំងលើផែនទី ({location})",
-                        "url": f"https://www.google.com/maps/search/?api=1&query={encoded}"
-                    }
+                    matched = True
             else:
                 if kw_clean in text_lower:
-                    encoded = urllib.parse.quote(f"{location} war map")
-                    return {
-                        "label": f"🗺️ ពិនិត្យទីតាំងលើផែនទី ({location})",
-                        "url": f"https://www.google.com/maps/search/?api=1&query={encoded}"
-                    }
+                    matched = True
+                    
+            if matched:
+                encoded = urllib.parse.quote(f"{location} war map")
+                return {
+                    "label": f"🗺️ ពិនិត្យទីតាំងលើផែនទី ({location})",
+                    "url": f"https://www.google.com/maps/search/?api=1&query={encoded}"
+                }
                     
     # 3. Fallback for war articles without specific city
-    if any(k in text_lower for k in ["ukraine", "russia", "អ៊ុយក្រែន", "រុស្ស៊ី", "kyiv", "moscow"]):
+    if any(k in text_lower for k in ["ukraine", "russia", "អ៊ុយក្រែន", "រុស្ស៊ី", "kyiv", "moscow", "ម៉ូស្គូ"]):
         return {
             "label": "🗺️ ពិនិត្យលើផែនទីសមរភូមិ (Ukraine Conflict Map)",
             "url": "https://liveuamap.com"
         }
-    if any(k in text_lower for k in ["israel", "gaza", "palestine", "អ៊ីស្រាអែល", "ហាម៉ាស់", "hezbollah"]):
+    if any(k in text_lower for k in [
+        "israel", "gaza", "palestine", "hezbollah", "iran", "lebanon", "yemen", "syria",
+        "អ៊ីស្រាអែល", "ហាម៉ាស់", "ប៉ាឡេស្ទីន", "លីបង់", "យេម៉ែន", "ស៊ីរី", "អ៊ីរ៉ង់"
+    ]):
         return {
             "label": "🗺️ ពិនិត្យលើផែនទីសមរភូមិ (Middle East Conflict Map)",
             "url": "https://israelpalestine.liveuamap.com"
@@ -240,4 +274,3 @@ def get_conflict_map_info(text: str = "", url: str = "") -> dict:
         "label": "🗺️ ពិនិត្យទីតាំងជម្លោះ (Global Conflict Map)",
         "url": "https://www.cfr.org/global-conflict-tracker"
     }
-

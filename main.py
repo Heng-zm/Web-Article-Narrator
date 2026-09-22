@@ -51,7 +51,6 @@ _user_last_request: dict = {}          # chat_id -> timestamp
 USER_THROTTLE_SECONDS = 3              # min seconds between user requests
 
 # Shared article cache: avoids re-scraping when multiple users hit confirm simultaneously
-# Structure: { url -> {'data': article_dict, 'expires': timestamp} }
 _article_cache: dict = {}
 ARTICLE_CACHE_TTL = 300                # 5 minutes
 
@@ -81,7 +80,6 @@ def cache_articles(articles: list):
         url = art.get('url', '')
         if url:
             _article_cache[url] = {'data': art, 'expires': now + ARTICLE_CACHE_TTL}
-    # Prune expired entries
     expired = [k for k, v in _article_cache.items() if v['expires'] <= now]
     for k in expired:
         _article_cache.pop(k, None)
@@ -118,7 +116,7 @@ async def broadcast_to_user(bot: Bot, chat_id, summary, image, reply_markup=None
                         chat_id=chat_id, text=caption,
                         parse_mode='HTML', reply_markup=reply_markup
                     )
-                return  # Success — exit retry loop
+                return
 
             except RetryAfter as e:
                 wait = e.retry_after + 1
@@ -137,11 +135,11 @@ async def broadcast_to_user(bot: Bot, chat_id, summary, image, reply_markup=None
                     return
                 if attempt == 2:
                     logger.error(f"Failed to send to {chat_id} after 3 attempts: {e}")
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                await asyncio.sleep(2 ** attempt)
 
 
 async def process_articles(bot: Bot):
-    """Background job to fetch, summarize, and send articles using a Batch ETL Pipeline."""
+    """Background job to fetch, summarize, and send articles 1 by 1 to eliminate processing delays."""
     if pipeline_lock.locked():
         logger.warning("Pipeline is already running. Skipping concurrent trigger to prevent spam.")
         return
@@ -149,7 +147,6 @@ async def process_articles(bot: Bot):
     async with pipeline_lock:
         logger.info("Running scheduled article check pipeline...")
 
-        # === STAGE 1: FETCH ===
         urls_to_check = await storage.get_base_urls()
         if BASE_URL and BASE_URL not in urls_to_check:
             urls_to_check.append(BASE_URL)
@@ -158,12 +155,12 @@ async def process_articles(bot: Bot):
             logger.warning("No base URLs configured. Add one via /addurl.")
             return
 
-        all_new_articles = []
         try:
             logger.info(f"Pipeline Stage 1: Concurrently scraping {len(urls_to_check)} websites...")
             scraping_tasks = [get_new_articles(base) for base in urls_to_check]
             results = await asyncio.gather(*scraping_tasks, return_exceptions=True)
 
+            all_new_articles = []
             for result in results:
                 if isinstance(result, list):
                     for article in result:
@@ -174,197 +171,171 @@ async def process_articles(bot: Bot):
                 logger.info("No new articles found.")
                 return
 
-            logger.info(f"Pipeline Stage 1: Extracted {len(all_new_articles)} new articles.")
+            logger.info(f"Pipeline Stage 1: Extracted {len(all_new_articles)} new articles. Processing 1 by 1...")
 
-            # === STAGE 2: SUMMARIZE — all articles in parallel ===
-            logger.info("Pipeline Stage 2: Summarizing articles in parallel...")
-            summaries = await asyncio.gather(
-                *[asyncio.to_thread(extractive_summary, a['text']) for a in all_new_articles]
-            )
-            for article, short_summary in zip(all_new_articles, summaries):
-                article['short_summary'] = short_summary
-
-            # === STAGE 3: TRANSLATE & VERIFY — all ops concurrent per article ===
-            logger.info("Pipeline Stage 3: Translating & Verifying articles concurrently...")
             from extractor import verify_article_sources
             from telegraph_engine import get_telegraph_url
-
-            async def _process_single_article(article: dict) -> None:
-                """Run all translation/verification/telegraph ops for one article concurrently."""
-                url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
-                raw_title = article.get('title', '') or url_slug
-                article['en_title'] = f"{raw_title} {url_slug}".strip()
-                full_text = article.get('text', '')
-
-                # All 4 I/O-bound ops fire simultaneously — no sequential blocking
-                (
-                    article['km_title'],
-                    article['verification'],
-                    article['km_text'],
-                    article['km_full_text'],
-                ) = await asyncio.gather(
-                    asyncio.to_thread(translate_text, raw_title),
-                    asyncio.to_thread(verify_article_sources, url_slug),
-                    asyncio.to_thread(translate_text, article['short_summary']),
-                    asyncio.to_thread(translate_text, full_text[:2500]),
-                )
-
-                # Telegraph page depends on km_full_text — runs after gather completes
-                try:
-                    if inspect.iscoroutinefunction(get_telegraph_url):
-                        article['telegraph_url'] = await get_telegraph_url(
-                            article['km_title'],
-                            article['km_full_text'],
-                            article.get('image_url'),
-                            article['url'],
-                        )
-                    else:
-                        res = await asyncio.to_thread(
-                            get_telegraph_url,
-                            article['km_title'],
-                            article['km_full_text'],
-                            article.get('image_url'),
-                            article['url'],
-                        )
-                        # Explicitly resolve if the synchronous function returned a coroutine object anyway
-                        if inspect.iscoroutine(res):
-                            article['telegraph_url'] = await res
-                        else:
-                            article['telegraph_url'] = res
-                except Exception as e:
-                    logger.warning(f"Telegraph URL generation failed: {e}")
-                    article['telegraph_url'] = None
-
-            # Process all articles concurrently; sleep 1s between articles to pace translate API
-            for idx, article in enumerate(all_new_articles):
-                await _process_single_article(article)
-                if idx < len(all_new_articles) - 1:
-                    await asyncio.sleep(1.0)  # Pace Google Translate between articles
-
-            # === STAGE 4: BROADCAST WITH STRICT CATEGORY DISPATCHING ===
-            logger.info("Pipeline Stage 4: Broadcasting to users with strict category filtering...")
             from categorizer import analyze_article_metadata
             from formatter import format_article_message
 
             subscribers = await storage.get_subscribers()
             all_user_prefs = await storage.get_all_user_categories()
 
-            for article in all_new_articles:
-                analysis = analyze_article_metadata(
-                    km_title=article.get('km_title', ''),
-                    km_text=article.get('km_text', ''),
-                    en_title=article.get('en_title', ''),
-                )
-                article_cats = analysis['categories']
-                article['categories'] = article_cats
+            # Process articles strictly 1 by 1 to prevent bottlenecks and save memory
+            for idx, article in enumerate(all_new_articles):
+                try:
+                    url_slug = article['url'].strip('/').split('/')[-1].replace('-', ' ')
+                    raw_title = article.get('title', '') or url_slug
+                    article['en_title'] = f"{raw_title} {url_slug}".strip()
+                    full_text = article.get('text', '')
 
-                # Strict Category Dispatching
-                target_subscribers = []
-                for sub_id in subscribers:
-                    user_cats = all_user_prefs.get(sub_id, [])
-                    if user_cats:
-                        if any(c in user_cats for c in article_cats):
-                            target_subscribers.append(sub_id)
-                    else:
-                        target_subscribers.append(sub_id)
+                    # 1. Summarize single article
+                    short_summary = await asyncio.to_thread(extractive_summary, full_text)
+                    article['short_summary'] = short_summary
 
-                # Build caption & keyboard via shared formatter
-                summary, reply_markup = format_article_message(
-                    km_title=article['km_title'],
-                    km_text=article['km_text'],
-                    url=article['url'],
-                    verification=article.get('verification'),
-                    analysis=analysis,
-                    telegraph_url=article.get('telegraph_url'),
-                )
-                
-                # FINAL GUARD: Sanitize reply_markup to guarantee no coroutines poison the cache
-                if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
-                    safe_keyboard = []
-                    for row in reply_markup.inline_keyboard:
-                        safe_row = []
-                        for btn in row:
-                            if inspect.iscoroutine(btn.url) or inspect.iscoroutinefunction(btn.url):
-                                logger.warning("Prevented coroutine from entering InlineKeyboardMarkup.")
-                                continue
-                            safe_row.append(btn)
-                        if safe_row:
-                            safe_keyboard.append(safe_row)
-                    reply_markup = InlineKeyboardMarkup(safe_keyboard)
+                    # 2. Translate and Verify concurrently for this single article
+                    (
+                        article['km_title'],
+                        article['verification'],
+                        article['km_text'],
+                        article['km_full_text'],
+                    ) = await asyncio.gather(
+                        asyncio.to_thread(translate_text, raw_title),
+                        asyncio.to_thread(verify_article_sources, url_slug),
+                        asyncio.to_thread(translate_text, short_summary),
+                        asyncio.to_thread(translate_text, full_text[:2500]),
+                    )
 
-                article['summary'] = summary
-                article['reply_markup'] = reply_markup
-
-                # Download image safely avoiding closure bug
-                image_bytes = None
-                image_url = article.get('image_url')
-                if image_url:
-                    from extractor import get_scraper
+                    # 3. Telegraph generation
                     try:
-                        def fetch_img(url_to_fetch):
-                            with get_scraper() as scraper:
-                                res = scraper.get(url_to_fetch, timeout=10)
-                                return res.content if res.status_code == 200 else None
-                        
-                        image_bytes = await asyncio.to_thread(fetch_img, image_url)
-                    except Exception as e:
-                        logger.warning(f"Failed to download image {image_url}: {e}")
-
-                # Store in RAM cache immediately
-                storage.store_processed_articles([{
-                    'url': article['url'],
-                    'title': article.get('title', ''),
-                    'km_title': article['km_title'],
-                    'summary': summary,
-                    'image_url': image_url,
-                    'categories': article_cats,
-                    'hashtags': analysis.get('hashtags', ''),
-                    'is_hot': analysis['is_hot'],
-                    'reply_markup': reply_markup,
-                    'image_bytes': image_bytes,
-                }])
-
-                if not target_subscribers:
-                    await storage.mark_article_sent(article['hash'])
-                    continue
-
-                # Upload image once → get Telegram file_id for free reuse
-                cached_photo = image_bytes
-                if image_bytes and target_subscribers:
-                    for candidate in list(target_subscribers[:5]):
-                        try:
-                            msg = await bot.send_photo(
-                                chat_id=candidate, photo=image_bytes,
-                                caption=summary, parse_mode='HTML',
-                                reply_markup=reply_markup, read_timeout=20,
+                        if inspect.iscoroutinefunction(get_telegraph_url):
+                            article['telegraph_url'] = await get_telegraph_url(
+                                article['km_title'],
+                                article['km_full_text'],
+                                article.get('image_url'),
+                                article['url'],
                             )
-                            cached_photo = msg.photo[-1].file_id
-                            article['photo_file_id'] = cached_photo
-                            if candidate in target_subscribers:
-                                target_subscribers.remove(candidate)
-                            logger.info(f"Cached photo file_id via user {candidate}")
-                            break
+                        else:
+                            res = await asyncio.to_thread(
+                                get_telegraph_url,
+                                article['km_title'],
+                                article['km_full_text'],
+                                article.get('image_url'),
+                                article['url'],
+                            )
+                            article['telegraph_url'] = await res if inspect.iscoroutine(res) else res
+                    except Exception as e:
+                        logger.warning(f"Telegraph URL generation failed: {e}")
+                        article['telegraph_url'] = None
+
+                    # 4. Metadata analysis & Category dispatching
+                    analysis = analyze_article_metadata(
+                        km_title=article.get('km_title', ''),
+                        km_text=article.get('km_text', ''),
+                        en_title=article.get('en_title', ''),
+                    )
+                    article_cats = analysis['categories']
+                    article['categories'] = article_cats
+
+                    target_subscribers = []
+                    for sub_id in subscribers:
+                        user_cats = all_user_prefs.get(sub_id, [])
+                        if user_cats:
+                            if any(c in user_cats for c in article_cats):
+                                target_subscribers.append(sub_id)
+                        else:
+                            target_subscribers.append(sub_id)
+
+                    summary, reply_markup = format_article_message(
+                        km_title=article['km_title'],
+                        km_text=article['km_text'],
+                        url=article['url'],
+                        verification=article.get('verification'),
+                        analysis=analysis,
+                        telegraph_url=article.get('telegraph_url'),
+                    )
+
+                    # Sanitize reply markup guard
+                    if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
+                        safe_keyboard = []
+                        for row in reply_markup.inline_keyboard:
+                            safe_row = []
+                            for btn in row:
+                                if inspect.iscoroutine(btn.url) or inspect.iscoroutinefunction(btn.url):
+                                    continue
+                                safe_row.append(btn)
+                            if safe_row:
+                                safe_keyboard.append(safe_row)
+                        reply_markup = InlineKeyboardMarkup(safe_keyboard)
+
+                    article['summary'] = summary
+                    article['reply_markup'] = reply_markup
+
+                    # Download image safely
+                    image_bytes = None
+                    image_url = article.get('image_url')
+                    if image_url:
+                        from extractor import get_scraper
+                        try:
+                            def fetch_img(url_to_fetch):
+                                with get_scraper() as scraper:
+                                    res = scraper.get(url_to_fetch, timeout=10)
+                                    return res.content if res.status_code == 200 else None
+                            image_bytes = await asyncio.to_thread(fetch_img, image_url)
                         except Exception as e:
-                            logger.warning(f"Photo upload candidate {candidate} failed: {e}")
-                            err = str(e).lower()
-                            if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
-                                await storage.remove_subscriber(candidate)
-                                if candidate in target_subscribers:
-                                    target_subscribers.remove(candidate)
+                            logger.warning(f"Failed to download image {image_url}: {e}")
 
-                # Concurrent broadcast in controlled batches of 25
-                batch_size = 25
-                for i in range(0, len(target_subscribers), batch_size):
-                    batch = target_subscribers[i:i + batch_size]
-                    await asyncio.gather(*[
-                        broadcast_to_user(bot, cid, summary, cached_photo, reply_markup)
-                        for cid in batch
-                    ])
-                    if i + batch_size < len(target_subscribers):
-                        await asyncio.sleep(1.0)
+                    # Store in RAM cache
+                    storage.store_processed_articles([{
+                        'url': article['url'],
+                        'title': article.get('title', ''),
+                        'km_title': article['km_title'],
+                        'summary': summary,
+                        'image_url': image_url,
+                        'categories': article_cats,
+                        'hashtags': analysis.get('hashtags', ''),
+                        'is_hot': analysis['is_hot'],
+                        'reply_markup': reply_markup,
+                        'image_bytes': image_bytes,
+                    }])
 
-                await storage.mark_article_sent(article['hash'])
-                await asyncio.sleep(1.0)
+                    if target_subscribers:
+                        cached_photo = image_bytes
+                        if image_bytes:
+                            for candidate in list(target_subscribers[:5]):
+                                try:
+                                    msg = await bot.send_photo(
+                                        chat_id=candidate, photo=image_bytes,
+                                        caption=summary, parse_mode='HTML',
+                                        reply_markup=reply_markup, read_timeout=20,
+                                    )
+                                    cached_photo = msg.photo[-1].file_id
+                                    article['photo_file_id'] = cached_photo
+                                    if candidate in target_subscribers:
+                                        target_subscribers.remove(candidate)
+                                    break
+                                except Exception as e:
+                                    err = str(e).lower()
+                                    if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
+                                        await storage.remove_subscriber(candidate)
+                                        if candidate in target_subscribers:
+                                            target_subscribers.remove(candidate)
+
+                        # Broadcast in batches of 25
+                        batch_size = 25
+                        for i in range(0, len(target_subscribers), batch_size):
+                            batch = target_subscribers[i:i + batch_size]
+                            await asyncio.gather(*[
+                                broadcast_to_user(bot, cid, summary, cached_photo, reply_markup)
+                                for cid in batch
+                            ])
+                            if i + batch_size < len(target_subscribers):
+                                await asyncio.sleep(0.5)
+
+                    await storage.mark_article_sent(article['hash'])
+                    logger.info(f"Processed and dispatched article {idx+1}/{len(all_new_articles)}")
+                except Exception as art_err:
+                    logger.error(f"Error processing individual article: {art_err}")
 
             logger.info("Pipeline successfully completed.")
 
@@ -374,28 +345,22 @@ async def process_articles(bot: Bot):
 
 from aiohttp import web
 
-# Keep strong references to background tasks so they don't get garbage collected
 active_tasks = set()
 
 async def health_check(request):
-    """Health check endpoint for Render."""
     return web.Response(text="OK")
 
 async def webhook_handler(request):
-    """Handle incoming GET requests to trigger a scrape immediately."""
     logger.info("Received external webhook trigger!")
     bot = request.app['bot']
-    # Trigger in background so we return HTTP 200 immediately
     task = asyncio.create_task(process_articles(bot))
     active_tasks.add(task)
     task.add_done_callback(active_tasks.discard)
     return web.Response(text="Scrape triggered successfully!")
 
 async def send_daily_digest(bot: Bot):
-    """Sends a summary of the top news of the morning to all users."""
     try:
         logger.info("Generating Morning Daily Digest...")
-        # Get subscribers
         subscribers = await storage.get_subscribers()
         if not subscribers:
             return
@@ -403,7 +368,6 @@ async def send_daily_digest(bot: Bot):
         urls = await storage.get_base_urls()
         digest_text = "🌅 <b>សង្ខេបព័ត៌មានប្រចាំថ្ងៃ (Morning Daily Digest)</b>\n\n"
         
-        # Scrape 3 top articles fresh from the sources
         articles_added = 0
         for url in urls[:2]:
             articles = await get_new_articles(url)
@@ -417,7 +381,6 @@ async def send_daily_digest(bot: Bot):
             
         digest_text += "\n<i>សូមជូនពរឱ្យអ្នកមានថ្ងៃដ៏ល្អ! ☀️</i>"
         
-        # Broadcast to everyone
         for chat_id in subscribers:
             try:
                 await bot.send_message(chat_id=chat_id, text=digest_text, parse_mode='HTML', disable_web_page_preview=True)
@@ -428,24 +391,18 @@ async def send_daily_digest(bot: Bot):
         logger.error(f"Failed to send digest: {e}")
 
 async def background_scheduler(bot: Bot):
-    """Near-realtime background polling loop continuously watching for new articles."""
     logger.info(f"Real-time background scheduler started. Monitoring sources every {CHECK_INTERVAL_SECONDS} seconds.")
-    
     digest_sent_date = None
-    
     while True:
         try:
             now = datetime.now()
-            # Send Daily Digest at 8:00 AM Cambodia time
             if now.hour == 8 and now.minute < 3:
                 if digest_sent_date != now.date():
                     await send_daily_digest(bot)
                     digest_sent_date = now.date()
-                    
             await process_articles(bot)
         except Exception as e:
             logger.error(f"Error in background scheduler cycle: {e}")
-            
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 async def main():
@@ -455,7 +412,6 @@ async def main():
 
     logger.info("Starting Webhook, Scheduler, and Telegram Bot...")
     
-    # 1. Start the aiohttp web server IMMEDIATELY so Render detects the open port
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/trigger', webhook_handler)
@@ -468,12 +424,11 @@ async def main():
     
     logger.info(f"Webhook server listening on http://0.0.0.0:{port}/trigger")
 
-    # 2. Build Telegram Application and attach handlers
     import bot as bot_module
     from telegram.ext import Application, CommandHandler, CallbackQueryHandler, InlineQueryHandler
     
     application = Application.builder().token(BOT_TOKEN).build()
-    app['bot'] = application.bot # Attach bot to web app after building
+    app['bot'] = application.bot
     
     application.add_handler(CommandHandler("start", bot_module.start))
     application.add_handler(CommandHandler("stop", bot_module.stop))
@@ -488,24 +443,18 @@ async def main():
     application.add_handler(CallbackQueryHandler(bot_module.button_handler))
     application.add_handler(InlineQueryHandler(bot_module.inline_search))
     
-    # Initialize and start the Telegram bot
     await application.initialize()
     await application.start()
-    
-    # Call the on_startup hook to init DB and set commands
     await bot_module.on_startup(application)
     
-    # Start polling for commands
     await application.updater.start_polling()
     logger.info("Telegram Bot Polling started!")
     
-    # 3. Start the heavy background polling loop last
     bg_task = asyncio.create_task(background_scheduler(application.bot))
     active_tasks.add(bg_task)
     
     logger.info("System fully operational!")
     
-    # Keep the main process alive
     try:
         await asyncio.Event().wait()
     finally:
