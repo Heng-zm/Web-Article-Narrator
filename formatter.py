@@ -37,21 +37,35 @@ def _build_bullets(km_text: str, budget: int) -> str:
     Converts the '|||'-delimited summary string into HTML bullet lines,
     respecting the remaining character budget.
     """
+    if not km_text or budget <= 0:
+        return ""
+        
     lines = [l.strip().lstrip("•-*🔹").strip() for l in km_text.split("|||") if l.strip()]
+    if not lines:
+        return ""
+        
     body = "<b>ចំណុចសំខាន់ៗ៖</b>\n"
     used = 0
+    
     for line in lines:
         if not line:
             continue
+            
         if len(line) > _MAX_BULLET_CHARS:
             line = line[:_MAX_BULLET_CHARS].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
-        if used + len(line) > budget:
-            remaining = budget - used
+            
+        # Account for bullet and newline syntax overhead in character budget
+        overhead = 3  # "• " + "\n"
+        
+        if used + len(line) + overhead > budget:
+            remaining = budget - used - overhead
             if remaining > 15:
-                body += f"• {line[:remaining]}…\n"
+                body += f"• {line[:remaining - 1]}…\n"
             break
+            
         body += f"• {line}\n"
-        used += len(line)
+        used += len(line) + overhead
+        
     return body.strip()
 
 
@@ -85,6 +99,10 @@ def format_article_message(
     date_str = date_str or datetime.now().strftime("%d/%m/%Y")
     domain = urlparse(url).netloc.replace("www.", "")
 
+    # Guard against abnormally long titles crushing the budget
+    if len(km_title) > 300:
+        km_title = km_title[:300].rsplit(" ", 1)[0] + "…"
+
     # ── Header ────────────────────────────────────────────────────────────────
     if analysis.get("is_hot"):
         header = (
@@ -96,7 +114,8 @@ def format_article_message(
 
     # ── Footer ────────────────────────────────────────────────────────────────
     if verification.get("verified"):
-        status_badge = f"✅ បានបញ្ជាក់ដោយ {verification['sources']} ប្រភព (Verified)"
+        sources = verification.get("sources", 1)
+        status_badge = f"✅ បានបញ្ជាក់ដោយ {sources} ប្រភព (Verified)"
     else:
         status_badge = "⚠️ មិនមានប្រភពអន្តរជាតិ (Unverified)"
 
@@ -106,17 +125,21 @@ def format_article_message(
         f"🛡️ <b>បញ្ជាក់ប្រភព:</b> {status_badge}\n"
         f"📅 {date_str}\n\n"
         f"{hashtags}"
-    )
+    ).strip()
 
     # ── Bullet body (respects remaining budget) ───────────────────────────────
-    overhead = len(header) + len(footer) + len("<b>ចំណុចសំខាន់ៗ៖</b>\n") + 4  # newlines
-    bullet_budget = max(50, _MAX_CAPTION - overhead)
+    # We allocate exact remaining space so we don't need a blind HTML-breaking truncation later.
+    overhead = len(header) + len(footer) + 2  # for \n\n between body and footer
+    bullet_header_len = len("<b>ចំណុចសំខាន់ៗ៖</b>\n")
+    
+    bullet_budget = max(0, _MAX_CAPTION - overhead - bullet_header_len)
     body = _build_bullets(km_text, bullet_budget)
 
-    caption = f"{header}{body}\n\n{footer}"
-    # Final safety clamp (should rarely trigger given the budget math above)
-    if len(caption) > _MAX_CAPTION:
-        caption = caption[:_MAX_CAPTION - 3] + "..."
+    # Assemble safely
+    if body:
+        caption = f"{header}{body}\n\n{footer}"
+    else:
+        caption = f"{header}{footer}"
 
     # ── Inline keyboard ───────────────────────────────────────────────────────
     keyboard: list[list[InlineKeyboardButton]] = []

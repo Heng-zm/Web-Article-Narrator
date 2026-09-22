@@ -8,6 +8,7 @@ except ImportError:
 
 import os
 import time
+import inspect
 # Add vendored packages for Wasmer Edge deployment
 if os.path.exists('packages'):
     sys.path.insert(0, os.path.abspath('packages'))
@@ -139,10 +140,8 @@ async def broadcast_to_user(bot: Bot, chat_id, summary, image, reply_markup=None
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
 
-
 async def process_articles(bot: Bot):
     """Background job to fetch, summarize, and send articles using a Batch ETL Pipeline."""
-    # Prevent concurrent execution of the pipeline (e.g. from rapid webhook triggers)
     if pipeline_lock.locked():
         logger.warning("Pipeline is already running. Skipping concurrent trigger to prevent spam.")
         return
@@ -211,13 +210,30 @@ async def process_articles(bot: Bot):
                 )
 
                 # Telegraph page depends on km_full_text — runs after gather completes
-                article['telegraph_url'] = await asyncio.to_thread(
-                    get_telegraph_url,
-                    article['km_title'],
-                    article['km_full_text'],
-                    article.get('image_url'),
-                    article['url'],
-                )
+                try:
+                    if inspect.iscoroutinefunction(get_telegraph_url):
+                        article['telegraph_url'] = await get_telegraph_url(
+                            article['km_title'],
+                            article['km_full_text'],
+                            article.get('image_url'),
+                            article['url'],
+                        )
+                    else:
+                        res = await asyncio.to_thread(
+                            get_telegraph_url,
+                            article['km_title'],
+                            article['km_full_text'],
+                            article.get('image_url'),
+                            article['url'],
+                        )
+                        # Explicitly resolve if the synchronous function returned a coroutine object anyway
+                        if inspect.iscoroutine(res):
+                            article['telegraph_url'] = await res
+                        else:
+                            article['telegraph_url'] = res
+                except Exception as e:
+                    logger.warning(f"Telegraph URL generation failed: {e}")
+                    article['telegraph_url'] = None
 
             # Process all articles concurrently; sleep 1s between articles to pace translate API
             for idx, article in enumerate(all_new_articles):
@@ -261,20 +277,36 @@ async def process_articles(bot: Bot):
                     analysis=analysis,
                     telegraph_url=article.get('telegraph_url'),
                 )
+                
+                # FINAL GUARD: Sanitize reply_markup to guarantee no coroutines poison the cache
+                if reply_markup and hasattr(reply_markup, 'inline_keyboard'):
+                    safe_keyboard = []
+                    for row in reply_markup.inline_keyboard:
+                        safe_row = []
+                        for btn in row:
+                            if inspect.iscoroutine(btn.url) or inspect.iscoroutinefunction(btn.url):
+                                logger.warning("Prevented coroutine from entering InlineKeyboardMarkup.")
+                                continue
+                            safe_row.append(btn)
+                        if safe_row:
+                            safe_keyboard.append(safe_row)
+                    reply_markup = InlineKeyboardMarkup(safe_keyboard)
+
                 article['summary'] = summary
                 article['reply_markup'] = reply_markup
 
-                # Download image — capture image_url in default arg to avoid closure bug
+                # Download image safely avoiding closure bug
                 image_bytes = None
                 image_url = article.get('image_url')
                 if image_url:
                     from extractor import get_scraper
                     try:
-                        def fetch_img(_url=image_url):
+                        def fetch_img(url_to_fetch):
                             with get_scraper() as scraper:
-                                res = scraper.get(_url, timeout=10)
+                                res = scraper.get(url_to_fetch, timeout=10)
                                 return res.content if res.status_code == 200 else None
-                        image_bytes = await asyncio.to_thread(fetch_img)
+                        
+                        image_bytes = await asyncio.to_thread(fetch_img, image_url)
                     except Exception as e:
                         logger.warning(f"Failed to download image {image_url}: {e}")
 
@@ -308,7 +340,8 @@ async def process_articles(bot: Bot):
                             )
                             cached_photo = msg.photo[-1].file_id
                             article['photo_file_id'] = cached_photo
-                            target_subscribers.remove(candidate)
+                            if candidate in target_subscribers:
+                                target_subscribers.remove(candidate)
                             logger.info(f"Cached photo file_id via user {candidate}")
                             break
                         except Exception as e:
@@ -316,7 +349,8 @@ async def process_articles(bot: Bot):
                             err = str(e).lower()
                             if 'blocked' in err or 'forbidden' in err or 'deactivated' in err:
                                 await storage.remove_subscriber(candidate)
-                                target_subscribers.discard(candidate) if hasattr(target_subscribers, 'discard') else None
+                                if candidate in target_subscribers:
+                                    target_subscribers.remove(candidate)
 
                 # Concurrent broadcast in controlled batches of 25
                 batch_size = 25

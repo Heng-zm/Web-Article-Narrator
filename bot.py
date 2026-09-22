@@ -135,7 +135,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 unsubscribe = stop
 
 
-
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rich Admin Analytics Dashboard."""
     chat_id = str(update.effective_chat.id)
@@ -377,13 +376,13 @@ async def latest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
         from extractor import get_scraper
         try:
-            def fetch_img():
+            def fetch_img(url_to_fetch):
                 with get_scraper() as scraper:
-                    res = scraper.get(image_url, timeout=8)
+                    res = scraper.get(url_to_fetch, timeout=8)
                     if res.status_code == 200:
                         return res.content
                     return None
-            image_bytes = await asyncio.to_thread(fetch_img)
+            image_bytes = await asyncio.to_thread(fetch_img, image_url)
         except Exception as e:
             logger.warning(f"Failed to download image {image_url}: {e}")
     
@@ -591,11 +590,11 @@ async def send_articles_for_categories(bot, chat_id: int, user_cats: list):
             if image_url:
                 await bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
                 try:
-                    def fetch(_url=image_url):  # default arg avoids closure capture bug
+                    def fetch(url_to_fetch): 
                         with get_scraper() as s:
-                            r = s.get(_url, timeout=8)
+                            r = s.get(url_to_fetch, timeout=8)
                             return r.content if r.status_code == 200 else None
-                    image_bytes = await asyncio.to_thread(fetch)
+                    image_bytes = await asyncio.to_thread(fetch, image_url)
                 except Exception:
                     pass
 

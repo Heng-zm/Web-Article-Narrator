@@ -6,17 +6,18 @@ import logging
 from bs4 import BeautifulSoup
 import cloudscraper
 import asyncio
+import requests
 from requests.adapters import HTTPAdapter
 import feedparser
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 import re
 import warnings
 
-# Suppress the harmless duckduckgo_search renaming warning
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="duckduckgo_search")
+# Suppress package renaming and runtime warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 def verify_article_sources(english_title: str) -> dict:
-    """Uses DuckDuckGo to search the English title and find verification across global sources."""
+    """Uses DDGS to search the English title and find verification across global sources."""
     if not english_title:
         return {"verified": False, "sources": 0}
         
@@ -57,7 +58,7 @@ def get_scraper():
         }
     )
     
-    # Inject deep human-like headers (removed 'br' because requests lacks native brotli support)
+    # Inject deep human-like headers
     scraper.headers.update({
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,km;q=0.8',
@@ -97,9 +98,8 @@ _FALLBACK_USER_AGENTS = [
 ]
 
 def fetch_url_sync(url: str) -> str:
-    """Fetches a URL with CloudScraper, retrying with rotated User-Agents on 403."""
+    """Fetches a URL with CloudScraper, retrying with rotated User-Agents on failures."""
     import random
-    import requests
 
     attempts = [None] + _FALLBACK_USER_AGENTS  # None = let CloudScraper pick its own UA first
     for ua in attempts:
@@ -110,10 +110,8 @@ def fetch_url_sync(url: str) -> str:
                 response = scraper.get(url, timeout=15)
                 response.raise_for_status()
                 return response.text
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 403:
-                continue  # Try next UA
-            raise  # Non-403 HTTP errors are re-raised immediately
+        except requests.exceptions.RequestException:
+            continue
     return None  # All UA attempts exhausted
 
 async def fetch_url(url: str) -> str:
@@ -121,18 +119,16 @@ async def fetch_url(url: str) -> str:
     try:
         result = await asyncio.to_thread(fetch_url_sync, url)
         if result is None:
-            logger.warning(f"All fetch attempts blocked (403) for {url} — skipping.")
+            logger.warning(f"All fetch attempts blocked or failed for {url} — skipping.")
         return result
     except Exception as e:
         logger.warning(f"Failed to fetch {url}: {e}")
         return None
 
-
 def sanitize_html(html: str) -> str:
     """Remove NULL bytes and XML-incompatible control characters from HTML."""
     if not html:
         return html
-    # Strip NULL bytes and C0/C1 control chars except tab, newline, carriage return
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', html)
 
 def extract_article_text(html: str) -> str:
@@ -145,7 +141,6 @@ def extract_article_text(html: str) -> str:
             
         # Fallback to readability-lxml
         doc = Document(html)
-        # The summary contains HTML, so we strip tags with BeautifulSoup
         soup = BeautifulSoup(doc.summary(), 'lxml')
         text = soup.get_text(separator='\n')
         return text.strip()
@@ -156,8 +151,10 @@ def extract_article_text(html: str) -> str:
 def is_listing_page(html: str, base_url: str) -> list:
     """
     Heuristic to extract fresh article links from a homepage or listing page.
-    Compatible with Khmer continuous text, English word boundaries, and news URL paths.
     """
+    if not html:
+        return []
+        
     soup = BeautifulSoup(html, 'lxml')
     links = soup.find_all('a', href=True)
     base_domain = urlparse(base_url).netloc.replace('www.', '')
@@ -221,10 +218,6 @@ def extract_metadata(html: str, base_url: str) -> tuple:
 async def get_new_articles(base_url: str) -> list:
     """
     Main entry point for real-time extraction.
-    Ultra-Fast & Resource-Efficient:
-    1. Checks RSS feed or HTML homepage.
-    2. Filters out already-sent articles in RAM BEFORE downloading full page HTML.
-    3. Only downloads full content for TRULY NEW articles.
     """
     import storage
     
@@ -259,17 +252,20 @@ async def get_new_articles(base_url: str) -> list:
                     continue
                 clean_link = link.split('?')[0]
                 url_hash = generate_hash(clean_link)
-                # Skip in RAM if already sent!
                 if await storage.is_article_sent(url_hash):
                     continue
                     
                 title = getattr(entry, 'title', 'ព័ត៌មានថ្មី')
                 desc = getattr(entry, 'description', '')
                 
-                # Fetch full article HTML only for truly new ones
                 page_html = await fetch_url(link)
-                meta_title, image_url = extract_metadata(page_html, base_url) if page_html else (title, None)
-                article_text = extract_article_text(page_html) if page_html else desc
+                
+                if page_html:
+                    title, image_url = await asyncio.to_thread(extract_metadata, page_html, base_url)
+                    article_text = await asyncio.to_thread(extract_article_text, page_html)
+                else:
+                    image_url = None
+                    article_text = desc
                 
                 articles.append({
                     'url': link,
@@ -284,7 +280,6 @@ async def get_new_articles(base_url: str) -> list:
         # 2. Fallback to HTML Listing Extraction with RAM pre-filtering
         links = is_listing_page(html, base_url)
         if links:
-            # Pre-filter: only keep links that have NOT been sent yet
             unsent_links = []
             for link in links:
                 h = generate_hash(link.split('?')[0])
@@ -292,7 +287,7 @@ async def get_new_articles(base_url: str) -> list:
                     unsent_links.append(link)
                     
             if not unsent_links:
-                return []  # Zero new articles -> return instantly in 0.01s!
+                return []
                 
             logger.info(f"[{base_url}] Found {len(unsent_links)} brand new articles to process.")
             
@@ -315,7 +310,6 @@ async def get_new_articles(base_url: str) -> list:
             results = await asyncio.gather(*tasks)
             return [r for r in results if r is not None]
         else:
-            # Single article page
             single_hash = generate_hash(base_url.split('?')[0])
             if await storage.is_article_sent(single_hash):
                 return []

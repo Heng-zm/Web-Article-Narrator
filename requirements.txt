@@ -14,7 +14,7 @@ pysqlite3-binary
 telegraph
 feedparser
 duckduckgo-search
-
+ddgs
 
 supabase>=2.3.0
 

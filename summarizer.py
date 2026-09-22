@@ -1,21 +1,25 @@
 import logging
 import math
 import re
+import threading
 from collections import defaultdict
 from typing import List
 
 import nltk
-from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.tokenize import sent_tokenize
 from nltk.corpus import stopwords
 
 logger = logging.getLogger(__name__)
 
-# ── NLTK bootstrap (runs once at import, skipped if already present) ──────────
-for _pkg, _path in [('punkt', 'tokenizers/punkt'), ('punkt_tab', 'tokenizers/punkt_tab'), ('stopwords', 'corpora/stopwords')]:
-    try:
-        nltk.data.find(_path)
-    except LookupError:
-        nltk.download(_pkg, quiet=True)
+# ── NLTK bootstrap (Thread-safe cold-start logic) ──────────
+_nltk_lock = threading.Lock()
+
+with _nltk_lock:
+    for _pkg, _path in [('punkt', 'tokenizers/punkt'), ('punkt_tab', 'tokenizers/punkt_tab'), ('stopwords', 'corpora/stopwords')]:
+        try:
+            nltk.data.find(_path)
+        except LookupError:
+            nltk.download(_pkg, quiet=True)
 
 # Module-level cache — built once, reused on every call
 _STOP_WORDS: set = set(stopwords.words('english'))

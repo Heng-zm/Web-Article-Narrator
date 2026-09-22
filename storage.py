@@ -7,6 +7,7 @@ except ImportError:
     pass
 
 import os
+import time
 import aiosqlite
 import logging
 import asyncio
@@ -38,11 +39,12 @@ if not USE_SUPABASE:
     else:
         DB_FILE = 'bot_database.db'
 _conn = None
+_conn_lock = asyncio.Lock()
 
 async def init_db():
     if USE_SUPABASE:
         return
-        
+
     global _conn
     try:
         if _conn is None:
@@ -56,6 +58,30 @@ async def init_db():
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
+
+async def _get_conn():
+    """
+    Lazily returns the shared SQLite connection, initializing it if needed.
+    Every SQLite code path should go through this instead of touching the
+    module-level `_conn` directly: some call sites previously assumed
+    `init_db()` had already run and would crash with AttributeError on a
+    None connection, and the old "if _conn is None: await init_db()" check
+    repeated ad hoc in several functions was racy under concurrent calls
+    (two coroutines could both see None and both open a connection).
+    """
+    global _conn
+    if _conn is None:
+        async with _conn_lock:
+            if _conn is None:  # re-check: another task may have won the race
+                await init_db()
+    return _conn
+
+async def close_db():
+    """Closes the shared SQLite connection, if any. Call on graceful shutdown."""
+    global _conn
+    if _conn is not None:
+        await _conn.close()
+        _conn = None
 
 # --- BASE URLS ---
 async def add_base_url(url: str):
@@ -74,21 +100,20 @@ async def add_base_urls(urls: list) -> list:
             return valid_urls
         except Exception as e:
             logger.error(f"Supabase add_base_urls bulk error: {e}")
-            added = []
-            for u in valid_urls:
-                try:
-                    await asyncio.to_thread(lambda: _supabase.table('base_urls').upsert({'url': u}).execute())
-                    added.append(u)
-                except Exception:
-                    pass
-            return added
+
+            async def _upsert_one(u):
+                await asyncio.to_thread(lambda: _supabase.table('base_urls').upsert({'url': u}).execute())
+                return u
+
+            # Run the per-item retries concurrently instead of one network
+            # round-trip at a time.
+            results = await asyncio.gather(*(_upsert_one(u) for u in valid_urls), return_exceptions=True)
+            return [u for u, r in zip(valid_urls, results) if not isinstance(r, Exception)]
     else:
         try:
-            if _conn is None:
-                await init_db()
-            for u in valid_urls:
-                await _conn.execute('INSERT OR IGNORE INTO base_urls (url) VALUES (?)', (u,))
-            await _conn.commit()
+            conn = await _get_conn()
+            await conn.executemany('INSERT OR IGNORE INTO base_urls (url) VALUES (?)', [(u,) for u in valid_urls])
+            await conn.commit()
             return valid_urls
         except Exception as e:
             logger.error(f"Failed to bulk add base urls: {e}")
@@ -104,9 +129,8 @@ async def get_base_urls() -> list:
             return []
     else:
         try:
-            if _conn is None:
-                await init_db()
-            async with _conn.execute('SELECT url FROM base_urls') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT url FROM base_urls') as cursor:
                 records = await cursor.fetchall()
                 return [r[0] for r in records]
         except Exception as e:
@@ -122,21 +146,24 @@ async def remove_base_urls(urls: list) -> list:
     if not cleaned:
         return []
     if USE_SUPABASE:
+        async def _delete_one(u):
+            await asyncio.to_thread(lambda: _supabase.table('base_urls').delete().eq('url', u).execute())
+            return u
+
+        # Run deletes concurrently instead of one network round-trip at a time.
+        results = await asyncio.gather(*(_delete_one(u) for u in cleaned), return_exceptions=True)
         removed = []
-        for u in cleaned:
-            try:
-                await asyncio.to_thread(lambda: _supabase.table('base_urls').delete().eq('url', u).execute())
+        for u, r in zip(cleaned, results):
+            if isinstance(r, Exception):
+                logger.error(f"Supabase remove_base_url error for {u}: {r}")
+            else:
                 removed.append(u)
-            except Exception as e:
-                logger.error(f"Supabase remove_base_url error: {e}")
         return removed
     else:
         try:
-            if _conn is None:
-                await init_db()
-            for u in cleaned:
-                await _conn.execute('DELETE FROM base_urls WHERE url = ?', (u,))
-            await _conn.commit()
+            conn = await _get_conn()
+            await conn.executemany('DELETE FROM base_urls WHERE url = ?', [(u,) for u in cleaned])
+            await conn.commit()
             return cleaned
         except Exception as e:
             logger.error(f"Failed to remove base urls: {e}")
@@ -159,8 +186,9 @@ async def add_subscriber(chat_id: int):
             logger.error(f"Supabase add_subscriber error: {e}")
     else:
         try:
-            await _conn.execute('INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)', (chat_id,))
-            await _conn.commit()
+            conn = await _get_conn()
+            await conn.execute('INSERT OR IGNORE INTO subscribers (chat_id) VALUES (?)', (chat_id,))
+            await conn.commit()
         except Exception as e:
             logger.error(f"Failed to add subscriber {chat_id}: {e}")
 
@@ -169,7 +197,8 @@ async def remove_subscriber(chat_id: int):
     if _subscribers_cache is not None:
         _subscribers_cache.discard(chat_id)
     _user_categories_cache.pop(chat_id, None)
-    
+    _user_last_action.pop(chat_id, None)  # avoid unbounded growth of the throttle cache
+
     if USE_SUPABASE:
         try:
             await asyncio.to_thread(lambda: _supabase.table('subscribers').delete().eq('chat_id', chat_id).execute())
@@ -179,9 +208,10 @@ async def remove_subscriber(chat_id: int):
             logger.error(f"Supabase remove_subscriber error: {e}")
     else:
         try:
-            await _conn.execute('DELETE FROM subscribers WHERE chat_id = ?', (chat_id,))
-            await _conn.execute('DELETE FROM user_categories WHERE chat_id = ?', (chat_id,))
-            await _conn.commit()
+            conn = await _get_conn()
+            await conn.execute('DELETE FROM subscribers WHERE chat_id = ?', (chat_id,))
+            await conn.execute('DELETE FROM user_categories WHERE chat_id = ?', (chat_id,))
+            await conn.commit()
         except Exception as e:
             logger.error(f"Failed to remove subscriber {chat_id}: {e}")
 
@@ -200,7 +230,8 @@ async def get_subscribers() -> list:
             return []
     else:
         try:
-            async with _conn.execute('SELECT chat_id FROM subscribers') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT chat_id FROM subscribers') as cursor:
                 records = await cursor.fetchall()
                 _subscribers_cache = set(r[0] for r in records)
                 return list(_subscribers_cache)
@@ -226,9 +257,8 @@ async def init_sent_articles_cache():
             logger.error(f"Failed to preload sent_articles from Supabase: {e}")
     else:
         try:
-            if _conn is None:
-                await init_db()
-            async with _conn.execute('SELECT url_hash FROM sent_articles') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT url_hash FROM sent_articles') as cursor:
                 records = await cursor.fetchall()
                 _sent_articles_cache = {r[0] for r in records}
                 logger.info(f"Preloaded {len(_sent_articles_cache)} sent articles from SQLite into RAM.")
@@ -255,10 +285,9 @@ async def mark_article_sent(url_hash: str):
             logger.error(f"Supabase mark_article_sent error: {e}")
     else:
         try:
-            if _conn is None:
-                await init_db()
-            await _conn.execute('INSERT OR IGNORE INTO sent_articles (url_hash) VALUES (?)', (url_hash,))
-            await _conn.commit()
+            conn = await _get_conn()
+            await conn.execute('INSERT OR IGNORE INTO sent_articles (url_hash) VALUES (?)', (url_hash,))
+            await conn.commit()
         except Exception as e:
             logger.error(f"Failed to mark article as sent {url_hash}: {e}")
 
@@ -271,10 +300,12 @@ async def get_sent_articles_count() -> int:
             return 0
     else:
         try:
-            async with _conn.execute('SELECT COUNT(*) FROM sent_articles') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT COUNT(*) FROM sent_articles') as cursor:
                 val = await cursor.fetchone()
                 return val[0] if val else 0
         except Exception as e:
+            logger.error(f"Failed to get sent articles count: {e}")
             return 0
 
 # --- USER CATEGORIES (CACHED) ---
@@ -292,12 +323,14 @@ async def get_user_categories(chat_id: int) -> list:
             return []
     else:
         try:
-            async with _conn.execute('SELECT category FROM user_categories WHERE chat_id = ?', (chat_id,)) as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT category FROM user_categories WHERE chat_id = ?', (chat_id,)) as cursor:
                 records = await cursor.fetchall()
                 cats = set(r[0] for r in records)
                 _user_categories_cache[chat_id] = cats
                 return list(cats)
         except Exception as e:
+            logger.error(f"Failed to get user categories for {chat_id}: {e}")
             return []
 
 async def get_all_user_categories() -> dict:
@@ -318,7 +351,8 @@ async def get_all_user_categories() -> dict:
             return {cid: list(cats) for cid, cats in _user_categories_cache.items()}
     else:
         try:
-            async with _conn.execute('SELECT chat_id, category FROM user_categories') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT chat_id, category FROM user_categories') as cursor:
                 records = await cursor.fetchall()
                 mapping = {}
                 for chat_id, category in records:
@@ -330,6 +364,7 @@ async def get_all_user_categories() -> dict:
                     _user_categories_cache[cid] = set(cats)
                 return mapping
         except Exception as e:
+            logger.error(f"Failed to get all user categories: {e}")
             return {cid: list(cats) for cid, cats in _user_categories_cache.items()}
 
 async def toggle_user_category(chat_id: int, category: str) -> bool:
@@ -354,11 +389,16 @@ async def toggle_user_category(chat_id: int, category: str) -> bool:
             logger.error(f"Supabase toggle_user_category error: {e}")
     else:
         try:
+            conn = await _get_conn()
             if not added:
-                await _conn.execute('DELETE FROM user_categories WHERE chat_id = ? AND category = ?', (chat_id, category))
+                await conn.execute('DELETE FROM user_categories WHERE chat_id = ? AND category = ?', (chat_id, category))
             else:
-                await _conn.execute('INSERT INTO user_categories (chat_id, category) VALUES (?, ?)', (chat_id, category))
-            await _conn.commit()
+                # OR IGNORE (not plain INSERT): if the cache and DB ever drift
+                # -- e.g. an earlier DELETE failed silently -- a plain INSERT
+                # would raise on the (chat_id, category) primary key and the
+                # row would never get persisted.
+                await conn.execute('INSERT OR IGNORE INTO user_categories (chat_id, category) VALUES (?, ?)', (chat_id, category))
+            await conn.commit()
         except Exception as e:
             logger.error(f"SQLite toggle_user_category error: {e}")
             
@@ -381,7 +421,8 @@ async def get_stats() -> dict:
             subs_count = s_res.count if s_res.count else 0
             return {'subscribers': subs_count, 'articles': await get_sent_articles_count()}
         else:
-            async with _conn.execute('SELECT COUNT(*) FROM subscribers') as cursor:
+            conn = await _get_conn()
+            async with conn.execute('SELECT COUNT(*) FROM subscribers') as cursor:
                 subs_count = (await cursor.fetchone())[0]
             return {'subscribers': subs_count, 'articles': await get_sent_articles_count()}
     except Exception as e:
@@ -395,7 +436,6 @@ _user_last_action = {}      # chat_id -> timestamp
 
 def is_user_throttled(chat_id: int, min_interval_seconds: float = 2.0) -> bool:
     """Debounce helper: Returns True if user actions are too rapid to prevent server overload."""
-    import time
     now = time.time()
     last = _user_last_action.get(chat_id, 0)
     if now - last < min_interval_seconds:
@@ -409,21 +449,34 @@ def store_processed_articles(articles: list):
     Guarantees instant responses for hundreds of concurrent users without re-scraping.
     """
     global _all_recent_articles, _articles_by_category
+    if not articles:
+        return
+
+    # Build each membership set once and update it incrementally, instead of
+    # re-deriving it from the full list on every single article (which was
+    # O(articles * len(list)) and defeated the "instant" promise above for
+    # any reasonably sized batch).
+    existing_urls = {a['url'] for a in _all_recent_articles}
+    category_url_sets = {}  # cat -> set of urls already in _articles_by_category[cat], loaded lazily
+
     for art in articles:
         if not art or not art.get('url'):
             continue
-        existing_urls = {a['url'] for a in _all_recent_articles}
-        if art['url'] not in existing_urls:
+        url = art['url']
+
+        if url not in existing_urls:
             _all_recent_articles.insert(0, art)
-            
-        cats = art.get('categories', [])
-        for cat in cats:
+            existing_urls.add(url)
+
+        for cat in art.get('categories', []):
             if cat not in _articles_by_category:
                 _articles_by_category[cat] = []
-            cat_urls = {a['url'] for a in _articles_by_category[cat]}
-            if art['url'] not in cat_urls:
+            if cat not in category_url_sets:
+                category_url_sets[cat] = {a['url'] for a in _articles_by_category[cat]}
+            if url not in category_url_sets[cat]:
                 _articles_by_category[cat].insert(0, art)
                 _articles_by_category[cat] = _articles_by_category[cat][:25]
+                category_url_sets[cat].add(url)
 
     _all_recent_articles = _all_recent_articles[:50]
 
@@ -449,4 +502,3 @@ def get_articles_for_categories(user_cats: list, limit: int = 3) -> list:
 def get_cached_recent_articles(limit: int = 10) -> list:
     """Returns most recent processed articles from memory."""
     return _all_recent_articles[:limit]
-
